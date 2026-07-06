@@ -482,18 +482,41 @@ insert(Msg, B=#buf{type=T, size=Size, data=Data}) ->
 %% the running total. (Cap enforcement is added in a later cycle.)
 insert(Msg, _W, B=#buf{max_weight=infinity}) ->
     insert(Msg, B);
-insert(Msg, W, B=#buf{type=T, size=Size, weight=Wt, data=Data}) ->
-    enforce_caps(B#buf{size=Size+1, weight=Wt+W, data=push(T, {W, Msg}, Data)}).
+insert(Msg, W, B=#buf{type=keep_old}) ->
+    %% keep_old keeps the older messages: reject the new one when it doesn't fit,
+    %% never dropping what is already buffered.
+    case fits_after_add(W, B) of
+        true  -> weighted_push(Msg, W, B);
+        false -> B#buf{drop=B#buf.drop + 1}
+    end;
+insert(Msg, W, B=#buf{}) ->
+    %% queue / stack / {mod}: drop from the drop-end to make room, then push. This
+    %% keeps the newly-posted message, mirroring each type's count-only overflow.
+    weighted_push(Msg, W, make_room(W, B)).
 
-%% Weighted dual-cap enforcement: after a push, drop one element from the buffer
-%% type's drop-end (subtracting its weight) until both the count cap and the weight
-%% cap are satisfied. Each drop bumps the drop counter, mirroring the count-only path.
-enforce_caps(B=#buf{size=Size, max=Max, weight=Weight, max_weight=MW})
-  when Size =< Max, Weight =< MW ->
-    B;
-enforce_caps(B=#buf{type=T, size=Size, weight=Weight, drop=Drop, data=Data}) ->
-    {{value, {W, _Msg}}, NewData} = drop_one(T, Data),
-    enforce_caps(B#buf{size=Size-1, weight=Weight-W, drop=Drop+1, data=NewData}).
+weighted_push(Msg, W, B=#buf{type=T, size=Size, weight=Wt, data=Data}) ->
+    B#buf{size=Size+1, weight=Wt+W, data=push(T, {W, Msg}, Data)}.
+
+%% Does one more message of weight W fit under both caps without dropping anything?
+fits_after_add(W, #buf{size=Size, max=Max, weight=Weight, max_weight=MW}) ->
+    Size < Max andalso Weight + W =< MW.
+
+%% Drop from the buffer type's drop-end (subtracting each dropped element's weight and
+%% bumping the drop counter) until one more message of weight W would fit. Stops if the
+%% buffer empties (the oversized-message case is rejected before this is reached).
+make_room(W, B) ->
+    case fits_after_add(W, B) of
+        true  -> B;
+        false ->
+            case B of
+                #buf{size=0} ->
+                    B;
+                #buf{type=T, size=Size, weight=Weight, drop=Drop, data=Data} ->
+                    {{value, {DW, _Msg}}, NewData} = drop_one(T, Data),
+                    make_room(W, B#buf{size=Size-1, weight=Weight-DW,
+                                       drop=Drop+1, data=NewData})
+            end
+    end.
 
 %% Remove one element from a buffer type's drop-end, returning it and the new data.
 drop_one(queue, Q)    -> queue:out(Q);      % front / oldest

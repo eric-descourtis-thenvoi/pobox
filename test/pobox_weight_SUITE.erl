@@ -3,7 +3,8 @@
 -compile(export_all).
 
 all() -> [usage_detailed_unweighted, weighted_post_and_drain,
-          weighted_overflow_drops_to_fit].
+          weighted_overflow_drops_to_fit,
+          weighted_overflow_keep_old, weighted_overflow_stack].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -54,5 +55,34 @@ weighted_overflow_drops_to_fit(_Config) ->
     #{count := 2, weight := 70, max_weight := 100} = pobox:usage_detailed(Box),
     pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
     {[b, c], 2, 1} = ?wait_msg({mail, Box, M, Cnt, Lost}, {M, Cnt, Lost}),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% A4a: a weighted keep_old box rejects the NEW message when it would exceed the
+%% weight cap, keeping the older messages.
+weighted_overflow_keep_old(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                   type => keep_old, initial_state => passive}),
+    pobox:post(Box, a, 50),
+    pobox:post(Box, b, 40),
+    pobox:post(Box, c, 30),               %% would be 120 > 100 -> reject c (keep old)
+    #{count := 2, weight := 90} = maps:with([count, weight], pobox:usage_detailed(Box)),
+    pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
+    {[a, b], 2, 1} = ?wait_msg({mail, Box, M, Cnt, Lost}, {M, Cnt, Lost}),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% A4b: a weighted stack box drops the most-recent EXISTING element to fit a new
+%% one (keeping the oldest and the newest) — mirroring unweighted stack overflow,
+%% NOT dropping the message just posted.
+weighted_overflow_stack(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                   type => stack, initial_state => passive}),
+    pobox:post(Box, a, 50),
+    pobox:post(Box, b, 40),
+    pobox:post(Box, c, 30),               %% 120 > 100 -> drop b (old newest), keep a + c
+    #{count := 2, weight := 80} = maps:with([count, weight], pobox:usage_detailed(Box)),
+    pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
+    {[c, a], 2, 1} = ?wait_msg({mail, Box, M, Cnt, Lost}, {M, Cnt, Lost}),
     unlink(Box),
     exit(Box, shutdown).
