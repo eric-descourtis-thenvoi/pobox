@@ -136,6 +136,10 @@ _weight_** of its contents by starting it with a `max_weight`:
                                    type => queue,
                                    initial_state => passive}).
 
+`max_weight` (and `detailed_mail`) are only accepted by the map/proplist
+`start_link/1,2` forms; the positional `start_link/3,4,5` arities are frozen and
+always produce an unweighted box.
+
 Weighting is entirely opt-in: without `max_weight` a box behaves exactly as
 before. On a weighted box:
 

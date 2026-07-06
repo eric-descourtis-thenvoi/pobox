@@ -510,6 +510,9 @@ handle_info(
 handle_info({post, Msg}, StateName, State) ->
     %% We allow anonymous posting and redirect it to the internal form.
     ?MODULE:StateName(cast, {post, Msg}, State);
+handle_info({post, Msg, Weight}, StateName, State) when is_integer(Weight), Weight > 0 ->
+    %% Anonymous weighted posting, symmetric with post/3.
+    ?MODULE:StateName(cast, {post, Msg, Weight}, State);
 
 handle_info(_Info, _StateName, _State) ->
     keep_state_and_data.
@@ -559,8 +562,8 @@ insert(Msg, B=#buf{type=T, size=Size, data=Data}) ->
     B#buf{size=Size+1, data=push(T, Msg, Data)}.
 
 %% Weighted insert: an unweighted box ignores the weight and uses the count-only
-%% fast path above; a weighted box wraps the message as {Weight, Msg} and tracks
-%% the running total. (Cap enforcement is added in a later cycle.)
+%% fast path above; a weighted box wraps the message as {Weight, Msg}, tracks the
+%% running total, and enforces both caps (see make_room/keep_old-reject below).
 insert(Msg, _W, B=#buf{max_weight=infinity}) ->
     insert(Msg, B);
 insert(_Msg, W, B=#buf{max_weight=MW, drop=Drop, drop_weight=DW}) when W > MW ->

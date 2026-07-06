@@ -5,7 +5,8 @@
 all() -> [bad_max_weight_rejected, bad_detailed_mail_rejected,
           resize_bad_max_weight_badarg, resize_bad_max_badarg,
           weighted_mod_without_drop_one_fails_fast,
-          good_configs_still_start].
+          good_configs_still_start,
+          anonymous_weighted_post].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -70,3 +71,12 @@ good_configs_still_start(_Config) ->
     Ok(#{max => 10, type => queue, max_weight => infinity}),
     Ok(#{max => 10, type => keep_old, max_weight => 100, detailed_mail => true}),
     Ok(#{max => 10, type => {mod, pobox_weighted_buf}, max_weight => 100}).
+
+%% E-L2 (review): a raw anonymous weighted post `Box ! {post, Msg, W}` must be honored
+%% on a weighted box (symmetry with `Box ! {post, Msg}`), not silently ignored.
+anonymous_weighted_post(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                   type => queue, initial_state => passive}),
+    Box ! {post, a, 40},
+    #{count := 1, weight := 40} = maps:with([count, weight], pobox:usage_detailed(Box)),
+    unlink(Box), exit(Box, shutdown).
