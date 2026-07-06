@@ -174,17 +174,24 @@ start_link(Name, Opts) when ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(Name), is_map(
 %% A buffer can be made larger without overhead, but it may take
 %% more work to make it smaller given there could be a
 %% need to drop messages that would now be considered overflow.
--spec resize(name(), max()) -> ok.
-resize(Box, NewMaxSize) when NewMaxSize > 0 ->
-    gen_statem:call(Box, {resize, NewMaxSize}).
+%% A map form `#{max => M, max_weight => MW}' retunes the count and/or weight caps
+%% on a weighted box; shrinking either cap drops from the drop-end to fit.
+-spec resize(name(), max() | #{max => pos_integer(), max_weight => pos_integer() | infinity}) -> ok.
+resize(Box, NewMaxSize) when is_integer(NewMaxSize), NewMaxSize > 0 ->
+    gen_statem:call(Box, {resize, NewMaxSize});
+resize(Box, Map) when is_map(Map) ->
+    gen_statem:call(Box, {resize, Map}).
 
 %% @doc Allows to take a given buffer, and make it larger or smaller.
 %% A buffer can be made larger without overhead, but it may take
 %% more work to make it smaller given there could be a
 %% need to drop messages that would now be considered overflow.
--spec resize(name(), max(), timeout()) -> ok.
-resize(Box, NewMaxSize, Timeout) when NewMaxSize > 0 ->
-  gen_statem:call(Box, {resize, NewMaxSize}, Timeout).
+-spec resize(name(), max() | #{max => pos_integer(), max_weight => pos_integer() | infinity},
+             timeout()) -> ok.
+resize(Box, NewMaxSize, Timeout) when is_integer(NewMaxSize), NewMaxSize > 0 ->
+  gen_statem:call(Box, {resize, NewMaxSize}, Timeout);
+resize(Box, Map, Timeout) when is_map(Map) ->
+  gen_statem:call(Box, {resize, Map}, Timeout).
 
 %% @doc Get the number of items in the PO Box and the capacity.
 -spec usage(name()) -> {non_neg_integer(), pos_integer()}.
@@ -572,16 +579,42 @@ buf_usage_map(#buf{size=Size, max=Max, max_weight=infinity}) ->
 buf_usage_map(#buf{size=Size, max=Max, weight=Weight, max_weight=MW}) ->
     #{count => Size, max => Max, weight => Weight, max_weight => MW}.
 
-resize_buf(NewMax, B=#buf{max=Max}) when Max =< NewMax ->
+%% Map form: retune count and/or weight caps, then drop-to-fit. (max_weight is only
+%% meaningful on an already-weighted box; converting an unweighted box is rejected in
+%% the preflight layer.)
+resize_buf(Map, B0) when is_map(Map) ->
+    B1 = case maps:find(max_weight, Map) of
+             {ok, MW} -> B0#buf{max_weight=MW};
+             error    -> B0
+         end,
+    resize_buf(maps:get(max, Map, B1#buf.max), B1);
+%% Unweighted integer resize: the original count-only paths, byte-for-byte.
+resize_buf(NewMax, B=#buf{max_weight=infinity, max=Max}) when Max =< NewMax ->
     B#buf{max=NewMax};
-resize_buf(NewMax, B=#buf{type=T, size=Size, drop=Drop, data=Data}) ->
+resize_buf(NewMax, B=#buf{max_weight=infinity, type=T, size=Size, drop=Drop, data=Data}) ->
     if Size > NewMax ->
         ToDrop = Size - NewMax,
         B#buf{size=NewMax, max=NewMax, drop=Drop+ToDrop,
               data=drop(T, ToDrop, Size, Data)};
        Size =< NewMax ->
         B#buf{max=NewMax}
-    end.
+    end;
+%% Weighted integer resize: set the count cap, then drop-to-fit weight-consistently.
+resize_buf(NewMax, B=#buf{}) ->
+    shrink_to_caps(B#buf{max=NewMax}).
+
+%% Drop from the drop-end (weight-consistently) until both caps hold. Used by weighted
+%% resize; the oversized-single-message case cannot arise here (no message is added).
+shrink_to_caps(B=#buf{size=Size, max=Max, weight=Weight, max_weight=MW})
+  when Size =< Max, Weight =< MW ->
+    B;
+shrink_to_caps(B=#buf{size=0}) ->
+    B;
+shrink_to_caps(B=#buf{type=T, size=Size, weight=Weight, drop=Drop,
+                      drop_weight=DropW, data=Data}) ->
+    {{value, {EW, _Msg}}, NewData} = drop_one(T, Data),
+    shrink_to_caps(B#buf{size=Size-1, weight=Weight-EW, drop=Drop+1,
+                         drop_weight=DropW+EW, data=NewData}).
 
 %% Returns {Msgs, Count, Lost, DeliveredWeight, LostWeight, NewBuf}. On an unweighted
 %% box each message weighs 1, so delivered weight == count and lost weight == lost.

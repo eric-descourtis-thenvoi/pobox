@@ -6,7 +6,7 @@ all() -> [usage_detailed_unweighted, weighted_post_and_drain,
           weighted_overflow_drops_to_fit,
           weighted_overflow_keep_old, weighted_overflow_stack,
           weighted_oversized_rejected, weighted_post_sync_full,
-          weighted_detailed_mail].
+          weighted_detailed_mail, weighted_resize].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -130,5 +130,22 @@ weighted_detailed_mail(_Config) ->
     pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
     {[b, c], #{count := 2, lost := 1, weight := 70, lost_weight := 50}} =
         ?wait_msg({mail, Box, M, Meta}, {M, Meta}),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% A8: resize accepts a map to retune the weight cap (and/or count cap) at runtime;
+%% shrinking either cap drops from the drop-end to fit. Integer resize on a weighted
+%% box stays weight-consistent.
+weighted_resize(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                   type => queue, initial_state => passive}),
+    pobox:post(Box, a, 40),
+    pobox:post(Box, b, 40),                       %% weight 80, count 2
+    ok = pobox:resize(Box, #{max_weight => 50}),  %% shrink weight cap -> drop a (oldest)
+    #{count := 1, weight := 40, max_weight := 50} = pobox:usage_detailed(Box),
+    ok = pobox:resize(Box, #{max_weight => 100}), %% grow weight cap back
+    pobox:post(Box, c, 40),                       %% [b, c], weight 80
+    ok = pobox:resize(Box, 1),                    %% count cap -> drop b, weight-consistent
+    #{count := 1, weight := 40} = maps:with([count, weight], pobox:usage_detailed(Box)),
     unlink(Box),
     exit(Box, shutdown).
