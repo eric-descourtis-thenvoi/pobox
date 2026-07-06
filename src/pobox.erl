@@ -86,7 +86,8 @@
                      heir_data :: undefined | term()}).
 
 -export([start_link/1, start_link/2, start_link/3, start_link/4, start_link/5,
-        resize/2, resize/3, usage/1, usage/2, active/3, notify/1, post/2,
+        resize/2, resize/3, usage/1, usage/2, usage_detailed/1, usage_detailed/2,
+        active/3, notify/1, post/2,
         post_sync/2, post_sync/3, give_away/3, give_away/4]).
 -export([init/1,
          active_s/3, passive/3, notify/3,
@@ -185,6 +186,22 @@ usage(Box) ->
 -spec usage(name(), timeout()) -> {non_neg_integer(), pos_integer()}.
 usage(Box, Timeout) ->
     gen_statem:call(Box, usage, Timeout).
+
+%% @doc Get a detailed usage map: item count and capacity, plus the current total
+%% weight and the weight cap. On an unweighted box, each message implicitly weighs 1
+%% (so `weight' == `count') and `max_weight' is `infinity'.
+-spec usage_detailed(name()) -> #{count := non_neg_integer(), max := pos_integer(),
+                                   weight := non_neg_integer(),
+                                   max_weight := pos_integer() | infinity}.
+usage_detailed(Box) ->
+    gen_statem:call(Box, usage_detailed).
+
+%% @doc Get a detailed usage map. See {@link usage_detailed/1}.
+-spec usage_detailed(name(), timeout()) -> #{count := non_neg_integer(), max := pos_integer(),
+                                             weight := non_neg_integer(),
+                                             max_weight := pos_integer() | infinity}.
+usage_detailed(Box, Timeout) ->
+    gen_statem:call(Box, usage_detailed, Timeout).
 
 %% @doc Forces the buffer into an active state where it will
 %% send the data it has accumulated. The fun passed needs to have
@@ -340,6 +357,9 @@ handle_call(From, {post, Msg}, StateName, S) ->
 handle_call(From, usage, _State, #state{buf=#buf{size=Size, max=MaxSize}}) ->
     gen_statem:reply(From, {Size, MaxSize}),
     keep_state_and_data;
+handle_call(From, usage_detailed, _State, #state{buf=Buf}) ->
+    gen_statem:reply(From, buf_usage_map(Buf)),
+    keep_state_and_data;
 handle_call(From, {resize, NewSize}, _StateName, S=#state{buf=Buf}) ->
     {keep_state, S#state{buf=resize_buf(NewSize,Buf)}, [{reply, From, ok}]};
 handle_call(From, {give_away, Dest, DestData, Origin}, _StateName, S0=#state{
@@ -438,6 +458,11 @@ insert(Msg, B=#buf{type=T, size=Size, data=Data}) ->
     B#buf{size=Size+1, data=push(T, Msg, Data)}.
 
 size(#buf{size=Size}) -> Size.
+
+%% Detailed usage map. On an unweighted box each message weighs 1, so the total
+%% weight equals the item count and there is no weight cap.
+buf_usage_map(#buf{size=Size, max=Max}) ->
+    #{count => Size, max => Max, weight => Size, max_weight => infinity}.
 
 resize_buf(NewMax, B=#buf{max=Max}) when Max =< NewMax ->
     B#buf{max=NewMax};
