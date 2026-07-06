@@ -12,6 +12,11 @@
 -behaviour(gen_statem).
 -compile({no_auto_import,[size/1]}).
 
+%% check_buffer_type/1 validates UNVALIDATED user input (via preflight/1), so its
+%% catch-all {bad_type, _} clause is runtime-reachable even though #pobox_opts.type is
+%% declared with the valid buffer-type union. Keep Dialyzer from flagging it.
+-dialyzer({no_match, check_buffer_type/1}).
+
 -ifdef(namespaced_types).
 -record(buf, {type = undefined :: undefined | stack | queue | keep_old | {mod, module()},
               max = undefined :: undefined | max(),
