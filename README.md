@@ -133,7 +133,9 @@ which builds it with `Module:new(Opts)` instead of `Module:new()`:
 
 The buffer module implements the optional `new/1` callback for this (see
 `samples/pobox_configurable_buf.erl`). Plain `{mod, Module}` buffers keep using
-`new/0` and are unaffected.
+`new/0` and are unaffected. A module that implements only `new/1` (no `new/0`) works
+fully, including on overflow — the buffer is emptied via the mandatory `drop/2`, never
+a constructor.
 
 ## Validating a configuration
 
@@ -145,11 +147,17 @@ returning `ok` or a descriptive `{error, Reason}`:
     {error, {module_not_loaded, no_such_mod}} =
         pobox:preflight(#{max => 10, type => {mod, no_such_mod}}).
 
-It catches a bad size, an unknown buffer type, and a custom buffer module that
-is not loaded or is missing a required callback (`new/0` or `new/1`, plus
-`push/2`, `pop/1`, `drop/2`). The map/proplist `start_link` forms run the same
-buffer-module check and fail fast with the same `{error, Reason}` instead of a
-cryptic init crash.
+It catches a bad size, an unknown buffer type, an invalid `name`/`owner`/`heir`, and a
+custom buffer module that is not loaded or is missing a required callback (`new/0` or
+`new/1`, plus `push/2`, `pop/1`, `drop/2`). Checking a `{mod, Module}` type does load
+`Module` (running any `-on_load`) so its exports can be inspected — it does not start a
+*pobox* process.
+
+The map/proplist `start_link` forms run the same buffer-module check and fail fast with
+`{error, Reason}` for a bad module. Note the asymmetry: a structurally-invalid option
+(bad `max`/`type`/`name`/`owner`/`heir`/`initial_state`) still raises `badarg` from
+`start_link` as it always has — call `preflight/1` first if you want a uniform
+`{error, Reason}` for every kind of misconfiguration.
 
 ## How to build it
 

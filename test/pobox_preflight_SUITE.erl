@@ -9,7 +9,8 @@ all() -> [mod_buffer_with_opts,
           preflight_bad_owner_and_heir,
           positional_start_link_fails_fast_on_bad_module,
           opts_only_buffer_survives_overflow,
-          preflight_bad_name].
+          preflight_bad_name,
+          preflight_rejects_bad_local_name].
 
 -define(wait_mail(PAT, RET),
     (fun() -> receive PAT -> RET after 2000 -> error({wait_too_long}) end end)()).
@@ -128,3 +129,10 @@ preflight_bad_name(_Config) ->
     ok = pobox:preflight(#{max => 10, type => queue, name => a_name}),
     ok = pobox:preflight(#{max => 10, type => queue, name => {global, g}}),
     ok = pobox:preflight(#{max => 10, type => queue}).           %% name defaults undefined
+
+%% E-L1 (review): {local, NonAtom} must be rejected — a local registered name is always
+%% an atom. Both preflight and the guards previously false-accepted a non-atom.
+preflight_rejects_bad_local_name(_Config) ->
+    {error, {bad_name, {local, 123}}} =
+        pobox:preflight(#{max => 10, type => queue, name => {local, 123}}),
+    ok = pobox:preflight(#{max => 10, type => queue, name => {local, ok_atom}}).

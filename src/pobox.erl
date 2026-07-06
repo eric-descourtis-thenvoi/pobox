@@ -50,7 +50,8 @@
 -define(
     PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(V),
     is_atom(V) orelse (
-    (tuple_size(V) == 2 andalso element(1, V) == local) orelse ?PROCESS_NAME_GUARD_VIA_OR_GLOBAL(V))
+    (tuple_size(V) == 2 andalso element(1, V) == local andalso is_atom(element(2, V)))
+        orelse ?PROCESS_NAME_GUARD_VIA_OR_GLOBAL(V))
 ).
 
 -define(POBOX_START_STATE_GUARD(V), V =:= notify orelse V =:= passive).
@@ -641,7 +642,8 @@ is_process_name(V) ->
 %% (mirrors ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID that validate_opts uses for `name').
 is_registered_name(V) ->
     is_atom(V)
-        orelse (is_tuple(V) andalso tuple_size(V) =:= 2 andalso element(1, V) =:= local)
+        orelse (is_tuple(V) andalso tuple_size(V) =:= 2 andalso element(1, V) =:= local
+                andalso is_atom(element(2, V)))
         orelse (is_tuple(V) andalso tuple_size(V) =:= 2 andalso element(1, V) =:= global)
         orelse (is_tuple(V) andalso tuple_size(V) =:= 3 andalso element(1, V) =:= via).
 
