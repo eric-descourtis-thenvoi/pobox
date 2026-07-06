@@ -2,7 +2,7 @@
 -include_lib("common_test/include/ct.hrl").
 -compile(export_all).
 
-all() -> [async_post_and_await].
+all() -> [async_post_and_await, pipelined_posts, async_await_noproc].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -24,3 +24,30 @@ async_post_and_await(_Config) ->
     full = pobox:post_await(R3, 5000),
     unlink(Box),
     exit(Box, shutdown).
+
+%% F2: a whole burst is submitted first (all post_async, none blocking), then collected.
+%% All land, in order, each answered ok.
+pipelined_posts(_Config) ->
+    N = 100,
+    {ok, Box} = pobox:start_link(self(), 1000, queue, passive),
+    ReqIds = [pobox:post_async(Box, I) || I <- lists:seq(1, N)],   %% fire all, non-blocking
+    Results = [pobox:post_await(R, 5000) || R <- ReqIds],           %% then collect all
+    [ok] = lists:usort(Results),
+    pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
+    receive
+        {mail, Box, Msgs, N, 0} -> Msgs = lists:seq(1, N)
+    after 5000 ->
+        error(no_mail)
+    end,
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% F3: awaiting a promise whose box is gone returns {error, noproc}.
+async_await_noproc(_Config) ->
+    {ok, Box} = pobox:start_link(self(), 10, queue, passive),
+    unlink(Box),
+    Ref = monitor(process, Box),
+    exit(Box, shutdown),
+    receive {'DOWN', Ref, process, Box, _} -> ok after 2000 -> error(box_not_dead) end,
+    ReqId = pobox:post_async(Box, x),
+    {error, noproc} = pobox:post_await(ReqId, 2000).
