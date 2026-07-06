@@ -5,7 +5,7 @@
 all() -> [usage_detailed_unweighted, weighted_post_and_drain,
           weighted_overflow_drops_to_fit,
           weighted_overflow_keep_old, weighted_overflow_stack,
-          weighted_oversized_rejected].
+          weighted_oversized_rejected, weighted_post_sync_full].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -99,5 +99,19 @@ weighted_oversized_rejected(_Config) ->
     #{count := 1, weight := 50} = maps:with([count, weight], pobox:usage_detailed(Box)),
     pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
     {[a], 1, 1} = ?wait_msg({mail, Box, M, Cnt, Lost}, {M, Cnt, Lost}),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% A6: post_sync/4 on a weighted box replies `full` when the message would not fit
+%% under the weight cap (or is oversized), and `ok` otherwise. Uses keep_old so a
+%% `full` reply means the message really was not stored.
+weighted_post_sync_full(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                   type => keep_old, initial_state => passive}),
+    ok   = pobox:post_sync(Box, a, 60, 5000),
+    ok   = pobox:post_sync(Box, b, 40, 5000),   %% 60+40 = 100, exactly at the cap
+    full = pobox:post_sync(Box, c, 10, 5000),   %% 110 > 100 -> does not fit
+    full = pobox:post_sync(Box, big, 200, 5000),%% oversized -> full
+    #{count := 2, weight := 100} = maps:with([count, weight], pobox:usage_detailed(Box)),
     unlink(Box),
     exit(Box, shutdown).

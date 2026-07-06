@@ -93,7 +93,7 @@
 -export([start_link/1, start_link/2, start_link/3, start_link/4, start_link/5,
         resize/2, resize/3, usage/1, usage/2, usage_detailed/1, usage_detailed/2,
         active/3, notify/1, post/2, post/3,
-        post_sync/2, post_sync/3, give_away/3, give_away/4]).
+        post_sync/2, post_sync/3, post_sync/4, give_away/3, give_away/4]).
 -export([init/1,
          active_s/3, passive/3, notify/3,
          callback_mode/0, terminate/3, code_change/4]).
@@ -251,6 +251,15 @@ post_sync(Box, Msg) when ?PROCESS_NAME_GUARD(Box) ->
 post_sync(Box, Msg, Timeout) when ?PROCESS_NAME_GUARD(Box) ->
     gen_statem:call(Box, {post, Msg}, Timeout).
 
+%% @doc Sends a weighted message to the PO Box and reports whether it fit. Replies
+%% `full' when the message would not fit under the count or weight cap (or is
+%% oversized), `ok' otherwise. On an unweighted box the weight is ignored and the
+%% reply is the count-based `full'/`ok' of {@link post_sync/3}.
+-spec post_sync(name(), term(), pos_integer(), timeout()) -> ok | full.
+post_sync(Box, Msg, Weight, Timeout)
+  when ?PROCESS_NAME_GUARD(Box), is_integer(Weight), Weight > 0 ->
+    gen_statem:call(Box, {post, Msg, Weight}, Timeout).
+
 %% @doc Give away the PO Box ownership to another process. This will send a message in the following form to Dest:
 %%      {pobox_transfer, BoxPid :: pid(), PreviousOwnerPid :: pid(), undefined, give_away}
 -spec give_away(name(), name(), timeout()) -> boolean().
@@ -373,6 +382,14 @@ handle_call(From, {post, Msg}, StateName, S=#state{buf=#buf{max=Size, size=Size}
 handle_call(From, {post, Msg}, StateName, S) ->
     gen_statem:reply(From, ok),
     ?MODULE:StateName(cast, {post, Msg}, S);
+handle_call(From, {post, Msg, W}, StateName, S=#state{buf=#buf{max_weight=infinity, max=Max, size=Size}}) ->
+    %% unweighted: weight ignored, count-based full (as post_sync/3)
+    gen_statem:reply(From, case Size >= Max of true -> full; false -> ok end),
+    ?MODULE:StateName(cast, {post, Msg, W}, S);
+handle_call(From, {post, Msg, W}, StateName, S=#state{buf=Buf}) ->
+    %% weighted: full iff the message would not fit without a drop (incl. oversized)
+    gen_statem:reply(From, case fits_after_add(W, Buf) of true -> ok; false -> full end),
+    ?MODULE:StateName(cast, {post, Msg, W}, S);
 handle_call(From, usage, _State, #state{buf=#buf{size=Size, max=MaxSize}}) ->
     gen_statem:reply(From, {Size, MaxSize}),
     keep_state_and_data;
