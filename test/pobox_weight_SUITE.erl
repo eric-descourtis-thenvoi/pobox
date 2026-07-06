@@ -6,7 +6,7 @@ all() -> [usage_detailed_unweighted, weighted_post_and_drain,
           weighted_overflow_drops_to_fit,
           weighted_overflow_keep_old, weighted_overflow_stack,
           weighted_oversized_rejected, weighted_post_sync_full,
-          weighted_detailed_mail, weighted_resize].
+          weighted_detailed_mail, weighted_resize, weighted_mod_buffer].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -147,5 +147,20 @@ weighted_resize(_Config) ->
     pobox:post(Box, c, 40),                       %% [b, c], weight 80
     ok = pobox:resize(Box, 1),                    %% count cap -> drop b, weight-consistent
     #{count := 1, weight := 40} = maps:with([count, weight], pobox:usage_detailed(Box)),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% A9: a weighted box on a custom {mod,_} buffer uses the buffer's drop_one/1 to
+%% account dropped weight — same drop-to-fit behaviour as the built-in queue.
+weighted_mod_buffer(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                   type => {mod, pobox_weighted_buf},
+                                   initial_state => passive}),
+    pobox:post(Box, a, 50),
+    pobox:post(Box, b, 40),
+    pobox:post(Box, c, 30),               %% 120 > 100 -> drop a (oldest via drop_one/1)
+    #{count := 2, weight := 70} = maps:with([count, weight], pobox:usage_detailed(Box)),
+    pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
+    {[b, c], 2, 1} = ?wait_msg({mail, Box, M, Cnt, Lost}, {M, Cnt, Lost}),
     unlink(Box),
     exit(Box, shutdown).
