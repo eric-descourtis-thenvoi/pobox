@@ -245,6 +245,12 @@ call(Box, Request) ->
 call(Box, Request, Timeout) when is_integer(Timeout); Timeout =:= infinity ->
     call(Box, Request, #{timeout => Timeout});
 call(Box, Request, Opts) when is_map(Opts) ->
+    %% Reject unknown option keys (e.g. a `timout' typo) rather than silently ignoring
+    %% them; `weight' is accepted-and-reserved for weighted boxes.
+    case maps:keys(Opts) -- [timeout, weight] of
+        []  -> ok;
+        _Bad -> erlang:error(badarg, [Box, Request, Opts])
+    end,
     Timeout = maps:get(timeout, Opts, 5000),
     case where(Box) of
         BoxPid when is_pid(BoxPid) ->

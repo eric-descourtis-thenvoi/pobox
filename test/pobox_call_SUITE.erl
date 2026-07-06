@@ -8,7 +8,8 @@ all() -> [call_reply_happy_path, call_dropped_on_keep_old_full,
           call_queue_overflow_degrades_to_timeout,
           concurrent_calls_each_get_their_own_reply,
           call_timeout_leaves_no_stray_message,
-          call_via_local_name].
+          call_via_local_name,
+          call_rejects_unknown_opts, call_misc_coverage].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -203,4 +204,30 @@ call_via_local_name(_Config) ->
     {'$pobox_call', ReplyTo, ping} = ?wait_msg({mail, Box, [C], 1, 0}, C),
     ok = pobox:reply(ReplyTo, pong),
     {ok, pong} = ?wait_msg({client_result, R}, R),
+    unlink(Box), exit(Box, shutdown).
+
+%% E-L1 (review): call/3's options map must reject unknown keys (e.g. a `timout` typo)
+%% instead of silently swallowing them and using defaults.
+call_rejects_unknown_opts(_Config) ->
+    {ok, Box} = pobox:start_link(self(), 10, keep_old, notify),
+    {'EXIT', {badarg, _}} = (catch pobox:call(Box, req, #{timout => 100})),
+    {'EXIT', {badarg, _}} = (catch pobox:call(Box, req, #{weight => 1, bogus => x})),
+    unlink(Box), exit(Box, shutdown).
+
+%% E-L3 (review): coverage for call/2 default, reply/2 guard, is_call/1 negatives, and
+%% a call over a {mod,_} buffer.
+call_misc_coverage(_Config) ->
+    false = pobox:is_call(plain_message),
+    false = pobox:is_call({'$pobox_call', not_a_ref, req}),   %% tag slot not a reference
+    true  = pobox:is_call({'$pobox_call', make_ref(), req}),
+    {'EXIT', {function_clause, _}} = (catch pobox:reply(not_a_ref, hi)),
+    %% call/2 (default timeout) over a {mod, _} buffer
+    {ok, Box} = pobox:start_link(self(), 10, {mod, pobox_queue_buf}, notify),
+    Owner = self(),
+    _ = spawn(fun() -> Owner ! {client_result, pobox:call(Box, {sq, 4})} end),
+    ?wait_msg({mail, Box, new_data}, ok),
+    pobox:active(Box, fun(M, S) -> {{ok, M}, S} end, no_state),
+    {'$pobox_call', ReplyTo, {sq, N}} = ?wait_msg({mail, Box, [C], 1, 0}, C),
+    ok = pobox:reply(ReplyTo, N * N),
+    {ok, 16} = ?wait_msg({client_result, R}, R),
     unlink(Box), exit(Box, shutdown).

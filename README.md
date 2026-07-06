@@ -412,6 +412,8 @@ This is more a wishlist than a roadmap, in no particular order:
 - 1.4.0: added PO Box calls — `call/2,3`, `reply/2`, `is_call/1` for native
          request/response where the owner answers the client directly, with
          drop-notification on `keep_old` admission-reject and owner filter drops.
+         (1.3.0 is the sibling message-weighting change; this branch is sequenced
+         after it, so the version lands as 1.4.0 once both merge.)
 - 1.2.0: added heir and `give_away` functionality / fixed `keep_old` buffer size tracking
 - 1.1.0: added `pobox_buf` behaviour to add custom buffer implementations
 - 1.0.4: move to gen\_statem implementation to avoid OTP 21 compile errors and OTP 20 warnings
