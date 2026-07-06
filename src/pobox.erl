@@ -176,7 +176,7 @@ start_link(Name, Opts) when ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(Name), is_map(
 %% need to drop messages that would now be considered overflow.
 %% A map form `#{max => M, max_weight => MW}' retunes the count and/or weight caps
 %% on a weighted box; shrinking either cap drops from the drop-end to fit.
--spec resize(name(), max() | #{max => pos_integer(), max_weight => pos_integer() | infinity}) -> ok.
+-spec resize(name(), max() | #{max => pos_integer(), max_weight => pos_integer() | infinity}) -> ok | {error, badarg}.
 resize(Box, NewMaxSize) when is_integer(NewMaxSize), NewMaxSize > 0 ->
     gen_statem:call(Box, {resize, NewMaxSize});
 resize(Box, Map) when is_map(Map) ->
@@ -187,7 +187,7 @@ resize(Box, Map) when is_map(Map) ->
 %% more work to make it smaller given there could be a
 %% need to drop messages that would now be considered overflow.
 -spec resize(name(), max() | #{max => pos_integer(), max_weight => pos_integer() | infinity},
-             timeout()) -> ok.
+             timeout()) -> ok | {error, badarg}.
 resize(Box, NewMaxSize, Timeout) when is_integer(NewMaxSize), NewMaxSize > 0 ->
   gen_statem:call(Box, {resize, NewMaxSize}, Timeout);
 resize(Box, Map, Timeout) when is_map(Map) ->
@@ -389,6 +389,11 @@ notify(info, Msg, Data) ->
         
 
 %% @private
+handle_call(From, {post, Msg}, StateName, S=#state{buf=Buf=#buf{max_weight=MW}}) when MW =/= infinity ->
+    %% weighted box: a weight-1 message can still not fit if the WEIGHT cap is
+    %% saturated, even when the count cap is far from full.
+    gen_statem:reply(From, case fits_after_add(1, Buf) of true -> ok; false -> full end),
+    ?MODULE:StateName(cast, {post, Msg}, S);
 handle_call(From, {post, Msg}, StateName, S=#state{buf=#buf{max=Size, size=Size}}) ->
     gen_statem:reply(From, full),
     ?MODULE:StateName(cast, {post, Msg}, S);
@@ -410,7 +415,14 @@ handle_call(From, usage_detailed, _State, #state{buf=Buf}) ->
     gen_statem:reply(From, buf_usage_map(Buf)),
     keep_state_and_data;
 handle_call(From, {resize, NewSize}, _StateName, S=#state{buf=Buf}) ->
-    {keep_state, S#state{buf=resize_buf(NewSize,Buf)}, [{reply, From, ok}]};
+    case weighting_flip(NewSize, Buf) of
+        true ->
+            %% Refuse to flip a box between weighted and unweighted: it would leave
+            %% wrapped {W,Msg} and raw Msg elements mixed in the same buffer.
+            {keep_state_and_data, [{reply, From, {error, badarg}}]};
+        false ->
+            {keep_state, S#state{buf=resize_buf(NewSize,Buf)}, [{reply, From, ok}]}
+    end;
 handle_call(From, {give_away, Dest, DestData, Origin}, _StateName, S0=#state{
     owner_pid=OwnerPid, owner_monitor_ref = MaybeOwnerMonitorRef, name=Name
 }) ->
@@ -579,9 +591,23 @@ buf_usage_map(#buf{size=Size, max=Max, max_weight=infinity}) ->
 buf_usage_map(#buf{size=Size, max=Max, weight=Weight, max_weight=MW}) ->
     #{count => Size, max => Max, weight => Weight, max_weight => MW}.
 
-%% Map form: retune count and/or weight caps, then drop-to-fit. (max_weight is only
-%% meaningful on an already-weighted box; converting an unweighted box is rejected in
-%% the preflight layer.)
+%% A resize would "flip" weighted-ness if its max_weight key changes whether the box is
+%% weighted (finite) vs unweighted (infinity). Such a resize is rejected (see handle_call)
+%% because it cannot be applied without re-wrapping/unwrapping every buffered element.
+weighting_flip(Map, #buf{max_weight=Cur}) when is_map(Map) ->
+    case maps:find(max_weight, Map) of
+        {ok, New} -> is_weighted(New) =/= is_weighted(Cur);
+        error     -> false
+    end;
+weighting_flip(_NewSize, _Buf) ->
+    false.
+
+is_weighted(infinity) -> false;
+is_weighted(MW) when is_integer(MW), MW > 0 -> true.
+
+%% Map form: retune count and/or weight caps, then drop-to-fit. A max_weight key that
+%% would flip weighted-ness is rejected earlier (see weighting_flip/2 in handle_call),
+%% so here it only ever moves between two finite values (or leaves it unchanged).
 resize_buf(Map, B0) when is_map(Map) ->
     B1 = case maps:find(max_weight, Map) of
              {ok, MW} -> B0#buf{max_weight=MW};

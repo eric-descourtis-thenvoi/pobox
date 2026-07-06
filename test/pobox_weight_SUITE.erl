@@ -6,7 +6,8 @@ all() -> [usage_detailed_unweighted, weighted_post_and_drain,
           weighted_overflow_drops_to_fit,
           weighted_overflow_keep_old, weighted_overflow_stack,
           weighted_oversized_rejected, weighted_post_sync_full,
-          weighted_detailed_mail, weighted_resize, weighted_mod_buffer].
+          weighted_detailed_mail, weighted_resize, weighted_mod_buffer,
+          weighted_post_sync_weightless_full, resize_rejects_weighting_flip].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -164,3 +165,34 @@ weighted_mod_buffer(_Config) ->
     {[b, c], 2, 1} = ?wait_msg({mail, Box, M, Cnt, Lost}, {M, Cnt, Lost}),
     unlink(Box),
     exit(Box, shutdown).
+
+%% E1 (review HIGH): the weightless post_sync/2,3 on a weighted box must consult the
+%% weight cap for its full/ok reply — a weight-1 message can still be rejected because
+%% the WEIGHT cap is saturated even though the count cap is nowhere near full.
+weighted_post_sync_weightless_full(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 5,
+                                   type => keep_old, initial_state => passive}),
+    ok   = pobox:post_sync(Box, a, 5, 5000),   %% weight 5, saturates the weight cap
+    full = pobox:post_sync(Box, b),            %% weight-1 can't fit (5+1 > 5) -> full
+    #{count := 1, weight := 5} = maps:with([count, weight], pobox:usage_detailed(Box)),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% E2 (review HIGH): resize must not flip a box between weighted and unweighted (which
+%% would leave wrapped/unwrapped elements mixed in the buffer). Such a resize is
+%% rejected with {error, badarg} and leaves the box healthy.
+resize_rejects_weighting_flip(_Config) ->
+    {ok, B1} = pobox:start_link(#{owner => self(), max => 10,
+                                  type => queue, initial_state => passive}),
+    {error, badarg} = pobox:resize(B1, #{max_weight => 5}),   %% unweighted -> weighted
+    pobox:post(B1, x),
+    #{count := 1, max_weight := infinity} =
+        maps:with([count, max_weight], pobox:usage_detailed(B1)),
+    unlink(B1), exit(B1, shutdown),
+    {ok, B2} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                  type => queue, initial_state => passive}),
+    {error, badarg} = pobox:resize(B2, #{max_weight => infinity}), %% weighted -> unweighted
+    pobox:post(B2, y, 50),
+    #{count := 1, weight := 50, max_weight := 100} =
+        maps:with([count, weight, max_weight], pobox:usage_detailed(B2)),
+    unlink(B2), exit(B2, shutdown).
