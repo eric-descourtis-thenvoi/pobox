@@ -531,6 +531,7 @@ filter(T, Data, Fun, State, Msgs, Count, Drop) ->
                 {{ok, Term}, NewState} ->
                     filter(T, NewData, Fun, NewState, [Term|Msgs], Count+1, Drop);
                 {drop, NewState} ->
+                    maybe_notify_drop(Msg),
                     filter(T, NewData, Fun, NewState, Msgs, Count, Drop+1);
                 skip ->
                     {lists:reverse(Msgs), Count, Drop, Data}
