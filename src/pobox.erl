@@ -141,21 +141,32 @@ start_link(Name, Owner, MaxSize, Type, StateName)
 default_opts() ->
   #pobox_opts{owner=self(), initial_state=notify, type=queue}.
 
--spec(start_link(map() | list()) -> {ok, pid()}).
+-spec(start_link(map() | list()) -> {ok, pid()} | {error, term()}).
 start_link(Opts) when is_list(Opts) ->
-  case validate_opts(proplist_to_pobox_opt_with_defaults(Opts)) of
-    PoBoxOpts = #pobox_opts{name=undefined} ->
-      gen_statem:start_link(?MODULE, PoBoxOpts, []);
-    PoBoxOpts = #pobox_opts{name=Name} ->
-      gen_statem:start_link(Name, ?MODULE, PoBoxOpts, [])
+  PoBoxOpts = validate_opts(proplist_to_pobox_opt_with_defaults(Opts)),
+  %% Fail fast with a descriptive reason for an unloadable/incomplete buffer module,
+  %% instead of a cryptic init crash once the box is already spawning.
+  case check_buffer_type(PoBoxOpts#pobox_opts.type) of
+    ok ->
+      case PoBoxOpts of
+        #pobox_opts{name=undefined} ->
+          gen_statem:start_link(?MODULE, PoBoxOpts, []);
+        #pobox_opts{name=Name} ->
+          gen_statem:start_link(Name, ?MODULE, PoBoxOpts, [])
+      end;
+    {error, _} = Error ->
+      Error
   end;
 start_link(Opts) when is_map(Opts) ->
   start_link(maps:to_list(Opts)).
 
--spec(start_link(name(), map() | list()) -> {ok, pid()}).
+-spec(start_link(name(), map() | list()) -> {ok, pid()} | {error, term()}).
 start_link(Name, Opts) when ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(Name), is_list(Opts) ->
   PoBoxOpts = validate_opts(proplist_to_pobox_opt_with_defaults([{name, Name} | Opts])),
-  gen_statem:start_link(Name, ?MODULE, PoBoxOpts, []);
+  case check_buffer_type(PoBoxOpts#pobox_opts.type) of
+    ok -> gen_statem:start_link(Name, ?MODULE, PoBoxOpts, []);
+    {error, _} = Error -> Error
+  end;
 start_link(Name, Opts) when ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(Name), is_map(Opts) ->
   start_link(Name, maps:to_list(Opts)).
 

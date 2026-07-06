@@ -4,7 +4,8 @@
 
 all() -> [mod_buffer_with_opts,
           preflight_valid, preflight_bad_max, preflight_bad_type,
-          preflight_module_not_loaded, preflight_missing_callback].
+          preflight_module_not_loaded, preflight_missing_callback,
+          start_link_fails_fast_on_bad_module].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -59,3 +60,15 @@ preflight_missing_callback(_Config) ->
     %% pobox_queue_buf has new/0 but no new/1 -> {mod, Mod, Opts} needs new/1
     {error, {missing_callback, {pobox_queue_buf, new, 1}}} =
         pobox:preflight(#{max => 10, type => {mod, pobox_queue_buf, opts}}).
+
+%% D2: start_link fails fast with the descriptive preflight reason for a bad buffer
+%% module, instead of a cryptic init crash. Trap exits so a linked init failure in the
+%% pre-fix behaviour can't take the test process down.
+start_link_fails_fast_on_bad_module(_Config) ->
+    Trap = process_flag(trap_exit, true),
+    {error, {module_not_loaded, no_such_pobox_mod}} =
+        pobox:start_link(#{owner => self(), max => 10, type => {mod, no_such_pobox_mod}}),
+    {error, {missing_callback, {pobox_configurable_buf, new, 0}}} =
+        pobox:start_link(#{owner => self(), max => 10, type => {mod, pobox_configurable_buf}}),
+    process_flag(trap_exit, Trap),
+    ok.
