@@ -244,7 +244,10 @@ call(Box, Request, Opts) when is_map(Opts) ->
     case where(Box) of
         BoxPid when is_pid(BoxPid) ->
             ReplyTo = erlang:monitor(process, BoxPid, [{alias, reply_demonitor}]),
-            gen_statem:cast(Box, {post, {'$pobox_call', ReplyTo, Request}}),
+            %% Cast to the resolved pid we are monitoring (not the name), so the monitor
+            %% and the post can't target two different processes if a registered name is
+            %% re-registered between resolving and posting.
+            gen_statem:cast(BoxPid, {post, {'$pobox_call', ReplyTo, Request}}),
             receive
                 {'$pobox_reply', ReplyTo, Reply} ->
                     {ok, Reply};
