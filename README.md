@@ -123,6 +123,46 @@ following criterias:
 More buffer types could be supported in the future, if people require
 them.
 
+## Calls (request/response)
+
+Besides fire-and-forget `post`, a client can make a **call** and wait for the
+owner to answer it directly:
+
+    {ok, Reply} = pobox:call(Box, Request).           %% default 5s timeout
+    {ok, Reply} = pobox:call(Box, Request, Timeout).
+
+A call is buffered like any other message. When the owner drains the box, a call
+arrives **wrapped** so it can be told apart from a plain post:
+
+    pobox:active(Box, fun(Msg, S) ->
+        case pobox:is_call(Msg) of
+            true ->
+                {'$pobox_call', ReplyTo, Request} = Msg,
+                pobox:reply(ReplyTo, handle(Request)),  %% answer the client directly
+                {drop, S};                              %% already answered; don't re-ship
+            false ->
+                {{ok, Msg}, S}
+        end
+    end, S0).
+
+`reply/2` sends the answer straight back to the calling process (the box is not in
+the reply path). `call/2,3` returns one of:
+
+- `{ok, Reply}` — the owner answered;
+- `{error, dropped}` — the box dropped the request (see below);
+- `{error, timeout}` — no reply within the timeout;
+- `{error, noproc}` — the box is gone.
+
+**Drop-safety.** If a call is dropped where the dropped element is already in
+hand — a full `keep_old` box rejecting it at admission, or the owner's filter
+returning `drop` — the caller is told `{error, dropped}` immediately instead of
+waiting for the timeout. A call that is instead bumped out of a plain `queue`/`stack`
+by later posts is **not** notified (that would mean scanning bulk drops) and simply
+times out. **Use a `keep_old` box for calls when you need drop notifications** — its
+bounded admission means an accepted call is never dropped later. `call/3` also
+accepts a `#{timeout => T}` options map (a `weight => W` key is reserved for
+weighted boxes).
+
 ## How to build it
 
     ./rebar compile
@@ -364,6 +404,9 @@ This is more a wishlist than a roadmap, in no particular order:
 - Provide default filter functions in a new module
 
 ## Changelog
+- 1.4.0: added PO Box calls — `call/2,3`, `reply/2`, `is_call/1` for native
+         request/response where the owner answers the client directly, with
+         drop-notification on `keep_old` admission-reject and owner filter drops.
 - 1.2.0: added heir and `give_away` functionality / fixed `keep_old` buffer size tracking
 - 1.1.0: added `pobox_buf` behaviour to add custom buffer implementations
 - 1.0.4: move to gen\_statem implementation to avoid OTP 21 compile errors and OTP 20 warnings
