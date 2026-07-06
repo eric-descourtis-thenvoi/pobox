@@ -50,7 +50,8 @@
 
 -define(POBOX_START_STATE_GUARD(V), V =:= notify orelse V =:= passive).
 -define(POBOX_BUFFER_TYPE_GUARD(V), V =:= queue orelse V =:= stack orelse V =:= keep_old orelse
-    (tuple_size(V) == 2 andalso element(1, V) =:= mod andalso is_atom(element(2, V)))
+    (tuple_size(V) == 2 andalso element(1, V) =:= mod andalso is_atom(element(2, V))) orelse
+    (tuple_size(V) == 3 andalso element(1, V) =:= mod andalso is_atom(element(2, V)))
 ).
 
 -type max() :: pos_integer().
@@ -80,7 +81,7 @@
 -record(pobox_opts, {name :: undefined | name(),
                      owner = self() :: name(),
                      max :: undefined | max(),
-                     type = queue :: stack | queue | keep_old | {mod, module()},
+                     type = queue :: stack | queue | keep_old | {mod, module()} | {mod, module(), term()},
                      initial_state = notify :: notify | passive,
                      heir :: undefined | name(),
                      heir_data :: undefined | term()}).
@@ -426,10 +427,14 @@ send_notification(S = #state{owner_pid=OwnerPid}) ->
     {next_state, passive, S}.
 
 %%% Generic buffer ops
--spec buf_new(queue | stack | keep_old | {mod, module()}, max()) -> buffer().
+-spec buf_new(queue | stack | keep_old | {mod, module()} | {mod, module(), term()},
+              max()) -> buffer().
 buf_new(queue, Size) -> #buf{type=queue, max=Size, data=queue:new()};
 buf_new(stack, Size) -> #buf{type=stack, max=Size, data=[]};
 buf_new(keep_old, Size) -> #buf{type=keep_old, max=Size, data=queue:new()};
+%% {mod, Mod, Opts} constructs the buffer with Mod:new(Opts); the stored type is
+%% normalized to {mod, Mod} so all later dispatch matches the 2-tuple. Opts is not kept.
+buf_new({mod, Mod, Opts}, Size) -> #buf{type={mod, Mod}, max=Size, data=Mod:new(Opts)};
 buf_new(T={mod, Mod}, Size) -> #buf{type=T, max=Size, data=Mod:new()}.
 
 insert(Msg, B=#buf{type=T, max=Size, size=Size, drop=Drop, data=Data}) ->
