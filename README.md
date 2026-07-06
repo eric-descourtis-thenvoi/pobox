@@ -123,6 +123,34 @@ following criterias:
 More buffer types could be supported in the future, if people require
 them.
 
+### Configurable custom buffers
+
+A custom buffer that needs construction-time configuration (a bound, a
+comparator, a prefix, ...) can be started with a `{mod, Module, Opts}` type,
+which builds it with `Module:new(Opts)` instead of `Module:new()`:
+
+    pobox:start_link(self(), 100, {mod, my_buf, #{overwrite => oldest}}).
+
+The buffer module implements the optional `new/1` callback for this (see
+`samples/pobox_configurable_buf.erl`). Plain `{mod, Module}` buffers keep using
+`new/0` and are unaffected.
+
+## Validating a configuration
+
+`pobox:preflight/1` checks a start option set **without** starting a process,
+returning `ok` or a descriptive `{error, Reason}`:
+
+    ok = pobox:preflight(#{max => 10, type => queue}).
+    {error, {bad_max, 0}} = pobox:preflight(#{max => 0, type => queue}).
+    {error, {module_not_loaded, no_such_mod}} =
+        pobox:preflight(#{max => 10, type => {mod, no_such_mod}}).
+
+It catches a bad size, an unknown buffer type, and a custom buffer module that
+is not loaded or is missing a required callback (`new/0` or `new/1`, plus
+`push/2`, `pop/1`, `drop/2`). The map/proplist `start_link` forms run the same
+buffer-module check and fail fast with the same `{error, Reason}` instead of a
+cryptic init crash.
+
 ## How to build it
 
     ./rebar compile
@@ -172,7 +200,8 @@ Where:
   is a mandatory property.
 - `BufferType` can be either `queue`, `stack` or `keep_old` and specifies
   which type is going to be used. You can also provide your buffer module
-  using `{mod, Module}`.
+  using `{mod, Module}`, or `{mod, Module, Opts}` to configure it at
+  construction (see *Configurable custom buffers*).
 - `InitialState` can be either `passive` or `notify`. The default value
   is set to `notify`. Having the buffer passive is desirable when you
   start it during an asynchronous `init` and do not want to receive
@@ -364,6 +393,9 @@ This is more a wishlist than a roadmap, in no particular order:
 - Provide default filter functions in a new module
 
 ## Changelog
+- 1.5.0: added `{mod, Module, Opts}` configurable custom buffers (optional `new/1`
+         callback) and `pobox:preflight/1` config validation, with `start_link`
+         failing fast on an unloadable/incomplete buffer module.
 - 1.2.0: added heir and `give_away` functionality / fixed `keep_old` buffer size tracking
 - 1.1.0: added `pobox_buf` behaviour to add custom buffer implementations
 - 1.0.4: move to gen\_statem implementation to avoid OTP 21 compile errors and OTP 20 warnings
