@@ -150,23 +150,49 @@ start_link(Name, Owner, MaxSize, Type, StateName)
 default_opts() ->
   #pobox_opts{owner=self(), initial_state=notify, type=queue}.
 
--spec(start_link(map() | list()) -> {ok, pid()}).
+-spec(start_link(map() | list()) -> {ok, pid()} | {error, term()}).
 start_link(Opts) when is_list(Opts) ->
-  case validate_opts(proplist_to_pobox_opt_with_defaults(Opts)) of
-    PoBoxOpts = #pobox_opts{name=undefined} ->
-      gen_statem:start_link(?MODULE, PoBoxOpts, []);
-    PoBoxOpts = #pobox_opts{name=Name} ->
-      gen_statem:start_link(Name, ?MODULE, PoBoxOpts, [])
+  PoBoxOpts = validate_opts(proplist_to_pobox_opt_with_defaults(Opts)),
+  case weighted_buffer_ready(PoBoxOpts) of
+    ok ->
+      case PoBoxOpts of
+        #pobox_opts{name=undefined} ->
+          gen_statem:start_link(?MODULE, PoBoxOpts, []);
+        #pobox_opts{name=Name} ->
+          gen_statem:start_link(Name, ?MODULE, PoBoxOpts, [])
+      end;
+    {error, _} = Error ->
+      Error
   end;
 start_link(Opts) when is_map(Opts) ->
   start_link(maps:to_list(Opts)).
 
--spec(start_link(name(), map() | list()) -> {ok, pid()}).
+-spec(start_link(name(), map() | list()) -> {ok, pid()} | {error, term()}).
 start_link(Name, Opts) when ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(Name), is_list(Opts) ->
   PoBoxOpts = validate_opts(proplist_to_pobox_opt_with_defaults([{name, Name} | Opts])),
-  gen_statem:start_link(Name, ?MODULE, PoBoxOpts, []);
+  case weighted_buffer_ready(PoBoxOpts) of
+    ok -> gen_statem:start_link(Name, ?MODULE, PoBoxOpts, []);
+    {error, _} = Error -> Error
+  end;
 start_link(Name, Opts) when ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(Name), is_map(Opts) ->
   start_link(Name, maps:to_list(Opts)).
+
+%% A weighted {mod,_} buffer needs drop_one/1 to account dropped weight; check it before
+%% spawning so a missing callback fails cleanly ({error, {missing_callback, ...}}) instead
+%% of crashing lazily on the first overflow and taking the linked owner down.
+weighted_buffer_ready(#pobox_opts{max_weight=infinity}) ->
+    ok;
+weighted_buffer_ready(#pobox_opts{type={mod, Mod}}) ->
+    check_drop_one(Mod);
+weighted_buffer_ready(#pobox_opts{}) ->
+    ok.
+
+check_drop_one(Mod) ->
+    _ = code:ensure_loaded(Mod),
+    case erlang:function_exported(Mod, drop_one, 1) of
+        true  -> ok;
+        false -> {error, {missing_callback, {Mod, drop_one, 1}}}
+    end.
 
 
 
@@ -415,13 +441,14 @@ handle_call(From, usage_detailed, _State, #state{buf=Buf}) ->
     gen_statem:reply(From, buf_usage_map(Buf)),
     keep_state_and_data;
 handle_call(From, {resize, NewSize}, _StateName, S=#state{buf=Buf}) ->
-    case weighting_flip(NewSize, Buf) of
+    %% Validate a map-form resize's values BEFORE weighting_flip/resize_buf run — an
+    %% unchecked bad max_weight would crash is_weighted/1 (killing the box + owner), and
+    %% a bad max would silently corrupt the count cap. Reject with {error, badarg}.
+    case valid_resize(NewSize) andalso not weighting_flip(NewSize, Buf) of
         true ->
-            %% Refuse to flip a box between weighted and unweighted: it would leave
-            %% wrapped {W,Msg} and raw Msg elements mixed in the same buffer.
-            {keep_state_and_data, [{reply, From, {error, badarg}}]};
+            {keep_state, S#state{buf=resize_buf(NewSize,Buf)}, [{reply, From, ok}]};
         false ->
-            {keep_state, S#state{buf=resize_buf(NewSize,Buf)}, [{reply, From, ok}]}
+            {keep_state_and_data, [{reply, From, {error, badarg}}]}
     end;
 handle_call(From, {give_away, Dest, DestData, Origin}, _StateName, S0=#state{
     owner_pid=OwnerPid, owner_monitor_ref = MaybeOwnerMonitorRef, name=Name
@@ -590,6 +617,20 @@ buf_usage_map(#buf{size=Size, max=Max, max_weight=infinity}) ->
     #{count => Size, max => Max, weight => Size, max_weight => infinity};
 buf_usage_map(#buf{size=Size, max=Max, weight=Weight, max_weight=MW}) ->
     #{count => Size, max => Max, weight => Weight, max_weight => MW}.
+
+%% Are a resize request's values well-formed? Integer count is guarded at the API; a map
+%% may carry `max` (pos_integer) and/or `max_weight` (pos_integer | infinity).
+valid_resize(Int) when is_integer(Int), Int > 0 -> true;
+valid_resize(Map) when is_map(Map) ->
+    valid_max(maps:find(max, Map)) andalso valid_max_weight(maps:find(max_weight, Map));
+valid_resize(_) -> false.
+
+valid_max(error)     -> true;
+valid_max({ok, M})   -> is_integer(M) andalso M > 0.
+
+valid_max_weight(error)          -> true;
+valid_max_weight({ok, infinity}) -> true;
+valid_max_weight({ok, MW})       -> is_integer(MW) andalso MW > 0.
 
 %% A resize would "flip" weighted-ness if its max_weight key changes whether the box is
 %% weighted (finite) vs unweighted (infinity). Such a resize is rejected (see handle_call)
@@ -772,10 +813,14 @@ validate_opts(Opts=#pobox_opts{
     owner=Owner,
     initial_state=StateName,
     max =MaxSize,
+    max_weight=MaxWeight,
     type=Type,
+    detailed_mail=DetailedMail,
     heir=Heir
 }) when
     is_integer(MaxSize), MaxSize > 0,
+    (MaxWeight =:= infinity orelse (is_integer(MaxWeight) andalso MaxWeight > 0)),
+    is_boolean(DetailedMail),
     ?POBOX_BUFFER_TYPE_GUARD(Type),
     ?POBOX_START_STATE_GUARD(StateName),
     ?PROCESS_NAME_GUARD(Owner),
