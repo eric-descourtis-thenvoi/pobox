@@ -15,13 +15,17 @@
 -ifdef(namespaced_types).
 -record(buf, {type = undefined :: undefined | stack | queue | keep_old | {mod, module()},
               max = undefined :: undefined | max(),
+              max_weight = infinity :: infinity | pos_integer(),
               size = 0 :: non_neg_integer(),
+              weight = 0 :: non_neg_integer(),
               drop = 0 :: drop(),
               data = undefined :: undefined | queue:queue() | list()}).
 -else.
 -record(buf, {type = undefined :: undefined | stack | queue | keep_old | {mod, module()},
               max = undefined :: undefined | max(),
+              max_weight = infinity :: infinity | pos_integer(),
               size = 0 :: non_neg_integer(),
+              weight = 0 :: non_neg_integer(),
               drop = 0 :: drop(),
               data = undefined :: undefined | queue() | list()}).
 -endif.
@@ -80,6 +84,7 @@
 -record(pobox_opts, {name :: undefined | name(),
                      owner = self() :: name(),
                      max :: undefined | max(),
+                     max_weight = infinity :: infinity | pos_integer(),
                      type = queue :: stack | queue | keep_old | {mod, module()},
                      initial_state = notify :: notify | passive,
                      heir :: undefined | name(),
@@ -87,7 +92,7 @@
 
 -export([start_link/1, start_link/2, start_link/3, start_link/4, start_link/5,
         resize/2, resize/3, usage/1, usage/2, usage_detailed/1, usage_detailed/2,
-        active/3, notify/1, post/2,
+        active/3, notify/1, post/2, post/3,
         post_sync/2, post_sync/3, give_away/3, give_away/4]).
 -export([init/1,
          active_s/3, passive/3, notify/3,
@@ -226,6 +231,13 @@ notify(Box) ->
 post(Box, Msg) ->
     gen_statem:cast(Box, {post, Msg}).
 
+%% @doc Sends a message to the PO Box with a pre-calculated weight. On a weighted
+%% box (started with `max_weight'), the message counts `Weight' toward the weight
+%% cap; on an unweighted box the weight is ignored.
+-spec post(name(), term(), pos_integer()) -> ok.
+post(Box, Msg, Weight) when is_integer(Weight), Weight > 0 ->
+    gen_statem:cast(Box, {post, Msg, Weight}).
+
 %% @doc Sends a message to the PO Box, to be buffered. But give additional
 %%      feedback about if PO Box is full. This is very useful when combined
 %%      with the keep_old buffer type because it tells you the message will
@@ -265,6 +277,7 @@ init(#pobox_opts{
     name = Name0,
     owner = Owner,
     max = MaxSize,
+    max_weight = MaxWeight,
     type = Type,
     initial_state = StateName,
     heir = Heir,
@@ -280,7 +293,7 @@ init(#pobox_opts{
             MonitorRef
     end,
     {ok, StateName, #state{
-        buf=buf_new(Type, MaxSize),
+        buf=buf_new(Type, MaxSize, MaxWeight),
         owner=Owner,
         owner_pid=OwnerPid,
         owner_monitor_ref=MaybeMonitorRef,
@@ -294,8 +307,10 @@ active_s(cast, {active_s, Fun, FunState}, S = #state{}) ->
     {next_state, active_s, S#state{filter=Fun, filter_state=FunState}};
 active_s(cast, notify, S = #state{}) ->
     {next_state, notify, S#state{filter=undefined, filter_state=undefined}};
-active_s(cast, {post, Msg}, S = #state{buf=Buf}) ->
-    NewBuf = insert(Msg, Buf),
+active_s(cast, {post, Msg}, S = #state{}) ->
+    active_s(cast, {post, Msg, 1}, S);
+active_s(cast, {post, Msg, W}, S = #state{buf=Buf}) ->
+    NewBuf = insert(Msg, W, Buf),
     send(S#state{buf=NewBuf});
 active_s(cast, _Msg, _State) ->
     %% unexpected
@@ -317,8 +332,10 @@ passive(cast, {active_s, Fun, FunState}, S = #state{buf=Buf}) ->
         0 -> {next_state, active_s, NewState};
         N when N > 0 -> send(NewState)
     end;
-passive(cast, {post, Msg}, S = #state{buf=Buf}) ->
-    {next_state, passive, S#state{buf=insert(Msg, Buf)}};
+passive(cast, {post, Msg}, S = #state{}) ->
+    passive(cast, {post, Msg, 1}, S);
+passive(cast, {post, Msg, W}, S = #state{buf=Buf}) ->
+    {next_state, passive, S#state{buf=insert(Msg, W, Buf)}};
 passive(cast, _Msg, _State) ->
     %% unexpected
     keep_state_and_data;
@@ -336,8 +353,10 @@ notify(cast, {active_s, Fun, FunState}, S = #state{buf=Buf}) ->
     end;
 notify(cast, notify, S = #state{}) ->
     {next_state, notify, S};
-notify(cast, {post, Msg}, S = #state{buf=Buf}) ->
-    send_notification(S#state{buf=insert(Msg, Buf)});
+notify(cast, {post, Msg}, S = #state{}) ->
+    notify(cast, {post, Msg, 1}, S);
+notify(cast, {post, Msg, W}, S = #state{buf=Buf}) ->
+    send_notification(S#state{buf=insert(Msg, W, Buf)});
 notify(cast, _Msg, _State) ->
     %% unexpected
     keep_state_and_data;
@@ -446,23 +465,35 @@ send_notification(S = #state{owner_pid=OwnerPid}) ->
     {next_state, passive, S}.
 
 %%% Generic buffer ops
--spec buf_new(queue | stack | keep_old | {mod, module()}, max()) -> buffer().
-buf_new(queue, Size) -> #buf{type=queue, max=Size, data=queue:new()};
-buf_new(stack, Size) -> #buf{type=stack, max=Size, data=[]};
-buf_new(keep_old, Size) -> #buf{type=keep_old, max=Size, data=queue:new()};
-buf_new(T={mod, Mod}, Size) -> #buf{type=T, max=Size, data=Mod:new()}.
+-spec buf_new(queue | stack | keep_old | {mod, module()}, max(),
+              infinity | pos_integer()) -> buffer().
+buf_new(queue, Size, MW) -> #buf{type=queue, max=Size, max_weight=MW, data=queue:new()};
+buf_new(stack, Size, MW) -> #buf{type=stack, max=Size, max_weight=MW, data=[]};
+buf_new(keep_old, Size, MW) -> #buf{type=keep_old, max=Size, max_weight=MW, data=queue:new()};
+buf_new(T={mod, Mod}, Size, MW) -> #buf{type=T, max=Size, max_weight=MW, data=Mod:new()}.
 
 insert(Msg, B=#buf{type=T, max=Size, size=Size, drop=Drop, data=Data}) ->
     B#buf{drop=Drop+1, data=push_drop(T, Msg, Size, Data)};
 insert(Msg, B=#buf{type=T, size=Size, data=Data}) ->
     B#buf{size=Size+1, data=push(T, Msg, Data)}.
 
+%% Weighted insert: an unweighted box ignores the weight and uses the count-only
+%% fast path above; a weighted box wraps the message as {Weight, Msg} and tracks
+%% the running total. (Cap enforcement is added in a later cycle.)
+insert(Msg, _W, B=#buf{max_weight=infinity}) ->
+    insert(Msg, B);
+insert(Msg, W, B=#buf{type=T, size=Size, weight=Wt, data=Data}) ->
+    B#buf{size=Size+1, weight=Wt+W, data=push(T, {W, Msg}, Data)}.
+
 size(#buf{size=Size}) -> Size.
 
 %% Detailed usage map. On an unweighted box each message weighs 1, so the total
-%% weight equals the item count and there is no weight cap.
-buf_usage_map(#buf{size=Size, max=Max}) ->
-    #{count => Size, max => Max, weight => Size, max_weight => infinity}.
+%% weight equals the item count and there is no weight cap; a weighted box reports
+%% its tracked total and cap.
+buf_usage_map(#buf{size=Size, max=Max, max_weight=infinity}) ->
+    #{count => Size, max => Max, weight => Size, max_weight => infinity};
+buf_usage_map(#buf{size=Size, max=Max, weight=Weight, max_weight=MW}) ->
+    #{count => Size, max => Max, weight => Weight, max_weight => MW}.
 
 resize_buf(NewMax, B=#buf{max=Max}) when Max =< NewMax ->
     B#buf{max=NewMax};
@@ -475,12 +506,37 @@ resize_buf(NewMax, B=#buf{type=T, size=Size, drop=Drop, data=Data}) ->
         B#buf{max=NewMax}
     end.
 
-buf_filter(Buf=#buf{type=T, drop=D, data=Data, size=C}, Fun, State) ->
+buf_filter(Buf=#buf{max_weight=infinity, type=T, drop=D, data=Data, size=C}, Fun, State) ->
     {Msgs, Count, Dropped, NewData} = filter(T, Data, Fun, State),
-    {Msgs, Count, Dropped+D, Buf#buf{drop=0, size=C-(Count+Dropped), data=NewData}}.
+    {Msgs, Count, Dropped+D, Buf#buf{drop=0, size=C-(Count+Dropped), data=NewData}};
+buf_filter(Buf=#buf{type=T, drop=D, data=Data, size=C, weight=W}, Fun, State) ->
+    {Msgs, Count, Dropped, RemovedW, NewData} = wfilter(T, Data, Fun, State),
+    {Msgs, Count, Dropped+D, Buf#buf{drop=0, size=C-(Count+Dropped),
+                                     weight=W-RemovedW, data=NewData}}.
 
 filter(T, Data, Fun, State) ->
     filter(T, Data, Fun, State, [], 0, 0).
+
+%% Weighted counterpart of filter/4: elements are stored as {Weight, Msg}; the owner
+%% filter fun sees the unwrapped Msg, and we accumulate the weight removed (delivered
+%% or dropped) so the running total can be decremented.
+wfilter(T, Data, Fun, State) ->
+    wfilter(T, Data, Fun, State, [], 0, 0, 0).
+
+wfilter(T, Data, Fun, State, Msgs, Count, Drop, RemovedW) ->
+    case pop(T, Data) of
+        {empty, NewData} ->
+            {lists:reverse(Msgs), Count, Drop, RemovedW, NewData};
+        {{value, {W, Msg}}, NewData} ->
+            case Fun(Msg, State) of
+                {{ok, Term}, NewState} ->
+                    wfilter(T, NewData, Fun, NewState, [Term|Msgs], Count+1, Drop, RemovedW+W);
+                {drop, NewState} ->
+                    wfilter(T, NewData, Fun, NewState, Msgs, Count, Drop+1, RemovedW+W);
+                skip ->
+                    {lists:reverse(Msgs), Count, Drop, RemovedW, Data}
+            end
+    end.
 
 filter(T, Data, Fun, State, Msgs, Count, Drop) ->
     case pop(T, Data) of
