@@ -109,17 +109,22 @@
 %% message ordering.
 %% The initial state can be either passive or notify, depending on whether
 %% the user wants to get notifications of new messages as soon as possible.
--spec start_link(name(), max(), stack | queue | keep_old | {mod, module()}) -> {ok, pid()}.
+-spec start_link(name(), max(), stack | queue | keep_old | {mod, module()} | {mod, module(), term()}) ->
+        {ok, pid()} | {error, term()}.
 start_link(Owner, MaxSize, Type) when ?PROCESS_NAME_GUARD(Owner), is_integer(MaxSize), MaxSize > 0 ->
     start_link(Owner, MaxSize, Type, notify).
 
 %% This one is messy because we have two clauses with 4 values, so we look them
 %% up based on guards.
--spec start_link(name(), max(), stack | queue | keep_old | {mod, module()}, notify | passive) -> {ok, pid()}.
+-spec start_link(name(), max(), stack | queue | keep_old | {mod, module()} | {mod, module(), term()},
+                 notify | passive) -> {ok, pid()} | {error, term()}.
 start_link(Owner, MaxSize, Type, StateName) when ?PROCESS_NAME_GUARD(Owner),
                                               ?POBOX_START_STATE_GUARD(StateName),
                                               is_integer(MaxSize), MaxSize > 0 ->
-    gen_statem:start_link(?MODULE, #pobox_opts{owner=Owner, max = MaxSize, type=Type, initial_state=StateName}, []);
+    case check_buffer_type(Type) of
+        ok -> gen_statem:start_link(?MODULE, #pobox_opts{owner=Owner, max = MaxSize, type=Type, initial_state=StateName}, []);
+        {error, _} = Error -> Error
+    end;
 start_link(Name, Owner, MaxSize, Type)
   when MaxSize > 0,
     ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(Name),
@@ -127,21 +132,27 @@ start_link(Name, Owner, MaxSize, Type)
     ?POBOX_BUFFER_TYPE_GUARD(Type) ->
     start_link(Name, Owner, MaxSize, Type, notify).
 
--spec start_link(name(), name(), max(), stack | queue | keep_old | {mod, module()},
-                 'notify'|'passive') -> {ok, pid()}.
+-spec start_link(name(), name(), max(),
+                 stack | queue | keep_old | {mod, module()} | {mod, module(), term()},
+                 'notify'|'passive') -> {ok, pid()} | {error, term()}.
 start_link(Name, Owner, MaxSize, Type, StateName)
   when MaxSize > 0,
     ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID(Name),
     ?PROCESS_NAME_GUARD(Owner),
     ?POBOX_BUFFER_TYPE_GUARD(Type),
     ?POBOX_START_STATE_GUARD(StateName) ->
-    gen_statem:start_link(Name, ?MODULE, #pobox_opts{
-        name = Name,
-        owner = Owner,
-        max = MaxSize,
-        type = Type,
-        initial_state = StateName
-    }, []).
+    case check_buffer_type(Type) of
+        ok ->
+            gen_statem:start_link(Name, ?MODULE, #pobox_opts{
+                name = Name,
+                owner = Owner,
+                max = MaxSize,
+                type = Type,
+                initial_state = StateName
+            }, []);
+        {error, _} = Error ->
+            Error
+    end.
 
 default_opts() ->
   #pobox_opts{owner=self(), initial_state=notify, type=queue}.
@@ -597,10 +608,26 @@ preflight(Opts) when is_list(Opts) ->
 
 check_opts(#pobox_opts{max=Max}) when not (is_integer(Max) andalso Max > 0) ->
     {error, {bad_max, Max}};
-check_opts(#pobox_opts{initial_state=S}) when S =/= notify, S =/= passive ->
-    {error, {bad_initial_state, S}};
-check_opts(#pobox_opts{type=Type}) ->
-    check_buffer_type(Type).
+check_opts(#pobox_opts{owner=Owner, heir=Heir, initial_state=S, type=Type}) ->
+    %% owner/heir use a function (not the guard macro) because the macro can't be
+    %% negated cleanly (`not ... orelse ...' precedence); mirrors validate_opts/1.
+    case is_process_name(Owner) of
+        false -> {error, {bad_owner, Owner}};
+        true ->
+            case Heir =:= undefined orelse is_process_name(Heir) of
+                false -> {error, {bad_heir, Heir}};
+                true ->
+                    case S =:= notify orelse S =:= passive of
+                        false -> {error, {bad_initial_state, S}};
+                        true  -> check_buffer_type(Type)
+                    end
+            end
+    end.
+
+is_process_name(V) ->
+    is_pid(V) orelse is_atom(V)
+        orelse (is_tuple(V) andalso tuple_size(V) =:= 2 andalso element(1, V) =:= global)
+        orelse (is_tuple(V) andalso tuple_size(V) =:= 3 andalso element(1, V) =:= via).
 
 check_buffer_type(queue) -> ok;
 check_buffer_type(stack) -> ok;

@@ -5,7 +5,9 @@
 all() -> [mod_buffer_with_opts,
           preflight_valid, preflight_bad_max, preflight_bad_type,
           preflight_module_not_loaded, preflight_missing_callback,
-          start_link_fails_fast_on_bad_module].
+          start_link_fails_fast_on_bad_module,
+          preflight_bad_owner_and_heir,
+          positional_start_link_fails_fast_on_bad_module].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -70,5 +72,28 @@ start_link_fails_fast_on_bad_module(_Config) ->
         pobox:start_link(#{owner => self(), max => 10, type => {mod, no_such_pobox_mod}}),
     {error, {missing_callback, {pobox_configurable_buf, new, 0}}} =
         pobox:start_link(#{owner => self(), max => 10, type => {mod, pobox_configurable_buf}}),
+    process_flag(trap_exit, Trap),
+    ok.
+
+%% E1 (review): preflight must also reject a structurally-invalid owner/heir that
+%% start_link (via validate_opts) would refuse — otherwise "preflight then trust" lies.
+preflight_bad_owner_and_heir(_Config) ->
+    {error, {bad_owner, "nope"}} =
+        pobox:preflight(#{max => 10, type => queue, owner => "nope"}),
+    {error, {bad_heir, "nope"}} =
+        pobox:preflight(#{max => 10, type => queue, heir => "nope"}),
+    %% valid owner/heir shapes still pass
+    ok = pobox:preflight(#{max => 10, type => queue, owner => self()}),
+    ok = pobox:preflight(#{max => 10, type => queue, heir => some_heir_name}),
+    ok = pobox:preflight(#{max => 10, type => queue}).           %% heir defaults undefined
+
+%% E2 (review): the positional start_link forms must fail fast on a bad module too,
+%% not just the map/proplist forms.
+positional_start_link_fails_fast_on_bad_module(_Config) ->
+    Trap = process_flag(trap_exit, true),
+    {error, {module_not_loaded, no_such_pobox_mod}} =
+        pobox:start_link(self(), 10, {mod, no_such_pobox_mod}),
+    {error, {module_not_loaded, no_such_pobox_mod}} =
+        pobox:start_link(self(), 10, {mod, no_such_pobox_mod, some_opts}, passive),
     process_flag(trap_exit, Trap),
     ok.
