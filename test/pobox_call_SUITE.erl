@@ -5,7 +5,8 @@
 all() -> [call_reply_happy_path, call_dropped_on_keep_old_full,
           call_dropped_by_filter, call_noproc_on_box_death,
           call_timeout_when_no_reply, call_noproc_unregistered,
-          call_queue_overflow_degrades_to_timeout].
+          call_queue_overflow_degrades_to_timeout,
+          concurrent_calls_each_get_their_own_reply].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -96,3 +97,47 @@ call_queue_overflow_degrades_to_timeout(_Config) ->
     {error, timeout} = ?wait_msg({client_result, R}, R),
     unlink(Box),
     exit(Box, shutdown).
+
+%% B5: many clients call concurrently; the owner drains cohorts and replies to each,
+%% and every client receives ITS OWN answer (replies are routed per-caller).
+concurrent_calls_each_get_their_own_reply(_Config) ->
+    N = 20,
+    {ok, Box} = pobox:start_link(self(), 100, keep_old, passive),
+    Owner = self(),
+    _ = [spawn(fun() -> Owner ! {res, I, pobox:call(Box, {sq, I}, 5000)} end)
+         || I <- lists:seq(1, N)],
+    ok = serve_calls(Box, N),
+    Results = collect_results(N, #{}),
+    lists:foreach(fun(I) ->
+        #{I := {ok, Sq}} = Results,
+        Sq = I * I
+    end, lists:seq(1, N)),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%%%%%%%%%%%%%%%
+%%% HELPERS %%%
+%%%%%%%%%%%%%%%
+
+%% Repeatedly drain the box and answer each call, until Remaining calls are served.
+serve_calls(_Box, 0) -> ok;
+serve_calls(Box, Remaining) ->
+    pobox:active(Box, fun(M, S) -> {{ok, M}, S} end, no_state),
+    receive
+        {mail, Box, Calls, _Count, _Lost} ->
+            [begin
+                 {'$pobox_call', ReplyTo, {sq, I}} = C,
+                 pobox:reply(ReplyTo, I * I)
+             end || C <- Calls],
+            serve_calls(Box, Remaining - length(Calls))
+    after 5000 ->
+        error({unserved, Remaining})
+    end.
+
+collect_results(0, Acc) -> Acc;
+collect_results(N, Acc) ->
+    receive
+        {res, I, R} -> collect_results(N - 1, Acc#{I => R})
+    after 5000 ->
+        error({missing_results, N})
+    end.
