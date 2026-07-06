@@ -87,7 +87,8 @@
 
 -export([start_link/1, start_link/2, start_link/3, start_link/4, start_link/5,
         resize/2, resize/3, usage/1, usage/2, active/3, notify/1, post/2,
-        post_sync/2, post_sync/3, give_away/3, give_away/4]).
+        post_sync/2, post_sync/3, give_away/3, give_away/4,
+        call/2, call/3, reply/2, is_call/1]).
 -export([init/1,
          active_s/3, passive/3, notify/3,
          callback_mode/0, terminate/3, code_change/4]).
@@ -221,6 +222,56 @@ post_sync(Box, Msg) when ?PROCESS_NAME_GUARD(Box) ->
 -spec post_sync(name(), term(), timeout()) -> ok | full.
 post_sync(Box, Msg, Timeout) when ?PROCESS_NAME_GUARD(Box) ->
     gen_statem:call(Box, {post, Msg}, Timeout).
+
+%% @doc Send a request to the PO Box and wait for the owner's direct reply. The
+%% request is buffered like any other message; the owner drains it (delivered
+%% wrapped as `{'$pobox_call', ReplyTo, Request}', see {@link is_call/1}), does the
+%% work, and answers with {@link reply/2} straight back to the caller. Returns
+%% `{ok, Reply}', or `{error, dropped}' if the box dropped the request, `{error,
+%% timeout}' if no reply arrived in time, or `{error, noproc}' if the box is gone.
+-spec call(name(), Request::term()) -> {ok, term()} | {error, dropped | timeout | noproc}.
+call(Box, Request) ->
+    call(Box, Request, 5000).
+
+%% @doc Like {@link call/2} with an explicit timeout, or a `#{timeout => T}' options
+%% map. (A `weight => W' key is reserved for weighted boxes.)
+-spec call(name(), Request::term(), timeout() | map()) ->
+        {ok, term()} | {error, dropped | timeout | noproc}.
+call(Box, Request, Timeout) when is_integer(Timeout); Timeout =:= infinity ->
+    call(Box, Request, #{timeout => Timeout});
+call(Box, Request, Opts) when is_map(Opts) ->
+    Timeout = maps:get(timeout, Opts, 5000),
+    case where(Box) of
+        BoxPid when is_pid(BoxPid) ->
+            ReplyTo = erlang:monitor(process, BoxPid, [{alias, reply_demonitor}]),
+            gen_statem:cast(Box, {post, {'$pobox_call', ReplyTo, Request}}),
+            receive
+                {'$pobox_reply', ReplyTo, Reply} ->
+                    {ok, Reply};
+                {'$pobox_drop', ReplyTo} ->
+                    {error, dropped};
+                {'DOWN', ReplyTo, process, _, _} ->
+                    {error, noproc}
+            after Timeout ->
+                erlang:demonitor(ReplyTo, [flush]),
+                {error, timeout}
+            end;
+        _ ->
+            {error, noproc}
+    end.
+
+%% @doc Answer a call, sending `Reply' directly to the calling process. `ReplyTo' is
+%% the reference from the delivered `{'$pobox_call', ReplyTo, Request}' element.
+-spec reply(reference(), term()) -> ok.
+reply(ReplyTo, Reply) when is_reference(ReplyTo) ->
+    ReplyTo ! {'$pobox_reply', ReplyTo, Reply},
+    ok.
+
+%% @doc True if a delivered buffer element is a call (from {@link call/2}), so the
+%% owner's filter can tell calls apart from plain posts.
+-spec is_call(term()) -> boolean().
+is_call({'$pobox_call', Ref, _Request}) when is_reference(Ref) -> true;
+is_call(_) -> false.
 
 %% @doc Give away the PO Box ownership to another process. This will send a message in the following form to Dest:
 %%      {pobox_transfer, BoxPid :: pid(), PreviousOwnerPid :: pid(), undefined, give_away}
