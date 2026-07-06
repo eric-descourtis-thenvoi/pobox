@@ -7,7 +7,8 @@ all() -> [call_reply_happy_path, call_dropped_on_keep_old_full,
           call_timeout_when_no_reply, call_noproc_unregistered,
           call_queue_overflow_degrades_to_timeout,
           concurrent_calls_each_get_their_own_reply,
-          call_timeout_leaves_no_stray_message].
+          call_timeout_leaves_no_stray_message,
+          call_via_local_name].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -188,3 +189,18 @@ collect_results(N, Acc) ->
     after 5000 ->
         error({missing_results, N})
     end.
+
+%% E1 (review M1): call/2,3 must accept a {local, Name} box reference (a valid name())
+%% instead of crashing with function_clause in where/1.
+call_via_local_name(_Config) ->
+    {ok, Box} = pobox:start_link({local, pobox_call_local}, self(), 10, keep_old, notify),
+    Owner = self(),
+    _ = spawn(fun() ->
+        Owner ! {client_result, pobox:call({local, pobox_call_local}, ping, 2000)}
+    end),
+    ?wait_msg({mail, Box, new_data}, ok),
+    pobox:active(Box, fun(M, S) -> {{ok, M}, S} end, no_state),
+    {'$pobox_call', ReplyTo, ping} = ?wait_msg({mail, Box, [C], 1, 0}, C),
+    ok = pobox:reply(ReplyTo, pong),
+    {ok, pong} = ?wait_msg({client_result, R}, R),
+    unlink(Box), exit(Box, shutdown).

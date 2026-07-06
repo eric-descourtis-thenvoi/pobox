@@ -163,6 +163,11 @@ bounded admission means an accepted call is never dropped later. `call/3` also
 accepts a `#{timeout => T}` options map (a `weight => W` key is reserved for
 weighted boxes).
 
+The `$pobox_call` / `$pobox_reply` / `$pobox_drop` tuple shapes are **reserved** for
+this protocol — don't `post` a message shaped like `{'$pobox_call', Ref, _}` with a
+`reference()` in the tag slot, or dropping it could send a stray `{'$pobox_drop', Ref}`
+to whatever `Ref` aliases.
+
 ## How to build it
 
     ./rebar compile

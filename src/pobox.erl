@@ -229,6 +229,11 @@ post_sync(Box, Msg, Timeout) when ?PROCESS_NAME_GUARD(Box) ->
 %% work, and answers with {@link reply/2} straight back to the caller. Returns
 %% `{ok, Reply}', or `{error, dropped}' if the box dropped the request, `{error,
 %% timeout}' if no reply arrived in time, or `{error, noproc}' if the box is gone.
+%%
+%% The `$pobox_call' / `$pobox_reply' / `$pobox_drop' 3/3/2-tuple shapes are RESERVED
+%% for this protocol: do not `post/2' a message shaped like `{'$pobox_call', Ref, _}'
+%% with a `reference()' in the tag slot, or a drop of it could fire a stray
+%% `{'$pobox_drop', Ref}' at whatever `Ref' aliases.
 -spec call(name(), Request::term()) -> {ok, term()} | {error, dropped | timeout | noproc}.
 call(Box, Request) ->
     call(Box, Request, 5000).
@@ -611,6 +616,7 @@ send_ownership_transfer(PreviousOwnerPid, NewOwnerPid, HeirData, BoxName, Reason
     {ok, NewOwnerPid}.
 
 where(Pid) when is_pid(Pid) -> Pid;
+where({local, Name}) -> erlang:whereis(Name);
 where(Name) when is_atom(Name) -> erlang:whereis(Name);
 where({global, Name}) -> global:whereis_name(Name);
 where({via, Module, Name}) -> Module:whereis_name(Name).
