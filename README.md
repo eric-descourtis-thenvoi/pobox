@@ -123,6 +123,62 @@ following criterias:
 More buffer types could be supported in the future, if people require
 them.
 
+## Weighting (optional)
+
+By default a PO Box caps only the *number* of buffered messages. When
+messages vary a lot in size, a pure count is a poor proxy for memory or
+downstream cost. A box can be given a **second, independent cap on the total
+_weight_** of its contents by starting it with a `max_weight`:
+
+    {ok, Box} = pobox:start_link(#{owner => self(),
+                                   max => 10_000,     %% count cap (mandatory)
+                                   max_weight => 5_000_000, %% weight cap (opt-in)
+                                   type => queue,
+                                   initial_state => passive}).
+
+Weighting is entirely opt-in: without `max_weight` a box behaves exactly as
+before. On a weighted box:
+
+- Each message carries a pre-calculated weight. `pobox:post(Box, Msg)` weighs
+  `1`; `pobox:post(Box, Msg, Weight)` and `pobox:post_sync(Box, Msg, Weight,
+  Timeout)` supply an explicit weight. (There is deliberately no
+  weight-calculation function — weights are supplied by the caller so the hot
+  path stays cheap.)
+- The box overflows when **either** cap is exceeded: `count > max` **or**
+  `weight > max_weight`. On overflow it drops from the same end its buffer type
+  always drops from, until *both* caps fit again.
+- A single message heavier than the whole cap can never fit, so it is rejected
+  outright (via `post_sync`, `full`) without disturbing what is already
+  buffered.
+- `post_sync/4` replies `full` when the message would not fit (a weight-aware
+  generalization of `post_sync/3`'s count-only signal).
+
+Inspect a box with:
+
+    pobox:usage(Box)          %% {Count, Max}       (unchanged)
+    pobox:usage_detailed(Box) %% #{count, max, weight, max_weight}
+
+`usage_detailed/1` also works on an unweighted box, where `weight` equals the
+count and `max_weight` is `infinity`.
+
+The caps can be retuned at runtime by passing a map to `resize`:
+
+    pobox:resize(Box, #{max => 20_000, max_weight => 8_000_000}).
+
+Shrinking either cap drops from the drop-end to fit. (A `resize` that would flip
+a box between weighted and unweighted is refused with `{error, badarg}`.)
+
+Finally, a box started with `detailed_mail => true` delivers a metrics map in
+place of the trailing count/lost fields, so the owner can see weight figures:
+
+    {mail, BoxPid, Messages, #{count := C, lost := L,
+                               weight := W, lost_weight := LW}}
+
+Custom `{mod, Module}` buffers can be weighted too, provided the module also
+implements the optional `drop_one/1` callback (see
+`samples/pobox_weighted_buf.erl`); a box started with `max_weight` on a module
+that lacks it will fail. Count-only custom buffers are unaffected.
+
 ## How to build it
 
     ./rebar compile
@@ -143,8 +199,10 @@ Start a buffer with any of the following:
         name => Name,
         owner => OwnerPid,
         max => MaxSize, %% mandatory
+        max_weight => MaxWeight, %% optional, see "Weighting"
         type => BufferType,
         initial_state => InitialState,
+        detailed_mail => Bool, %% optional, see "Weighting"
         heir => HeirPid,
         heir_data => HeirData
     })
@@ -364,6 +422,10 @@ This is more a wishlist than a roadmap, in no particular order:
 - Provide default filter functions in a new module
 
 ## Changelog
+- 1.3.0: added optional message weighting — a second, opt-in cap on total buffer
+         weight alongside the count cap (`max_weight`, `post/3`, `post_sync/4`,
+         `usage_detailed/1,2`, map-form `resize`, opt-in `detailed_mail`, and an
+         optional `drop_one/1` buffer callback). Fully backward compatible.
 - 1.2.0: added heir and `give_away` functionality / fixed `keep_old` buffer size tracking
 - 1.1.0: added `pobox_buf` behaviour to add custom buffer implementations
 - 1.0.4: move to gen\_statem implementation to avoid OTP 21 compile errors and OTP 20 warnings
