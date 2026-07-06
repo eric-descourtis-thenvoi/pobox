@@ -3,7 +3,8 @@
 -export([
     prop_we_always_go_to_passive_mode_after_an_automatic_transfer/0,
     prop_we_always_go_to_passive_mode_after_a_give_away_transfer/0,
-    prop_will_discard_after_max/0
+    prop_will_discard_after_max/0,
+    prop_weighted_never_exceeds_caps/0
 ]).
 
 -type pobox_max() :: pos_integer().
@@ -92,6 +93,25 @@ prop_will_discard_after_max() ->
             [pobox:post_sync(Box, N, 5000) || N <- lists:seq(1, MaxSize * 2)]
         )) =:= MaxSize
     end).
+
+%% After any sequence of weighted posts (across all buffer types, including a custom
+%% {mod,_} buffer), a weighted box must never exceed either cap: count =< max and
+%% weight =< max_weight. Oversized messages (weight > max_weight) are simply rejected.
+prop_weighted_never_exceeds_caps() ->
+    ?FORALL({Max, MaxWeight, Weights, BufType},
+            {pos_integer(), pos_integer(), list(pos_integer()),
+             oneof([queue, stack, keep_old, {mod, pobox_weighted_buf}])},
+        begin
+            {ok, Box} = pobox:start_link(#{owner => self(), max => Max,
+                                           max_weight => MaxWeight, type => BufType,
+                                           initial_state => passive}),
+            _ = [pobox:post(Box, msg, W) || W <- Weights],
+            #{count := C, weight := Wt, max := M, max_weight := MW} =
+                pobox:usage_detailed(Box),
+            unlink(Box),
+            exit(Box, shutdown),
+            C =< M andalso Wt =< MW
+        end).
 
 do_messaging_behaviour(Box, {Time, _, {resize, MaxSize}}) ->
     timer:sleep(Time),
