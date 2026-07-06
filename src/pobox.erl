@@ -88,7 +88,7 @@
 
 -export([start_link/1, start_link/2, start_link/3, start_link/4, start_link/5,
         resize/2, resize/3, usage/1, usage/2, active/3, notify/1, post/2,
-        post_sync/2, post_sync/3, give_away/3, give_away/4]).
+        post_sync/2, post_sync/3, give_away/3, give_away/4, preflight/1]).
 -export([init/1,
          active_s/3, passive/3, notify/3,
          callback_mode/0, terminate/3, code_change/4]).
@@ -567,6 +567,47 @@ validate_opts(Opts=#pobox_opts{
     Opts;
 validate_opts(Opts) ->
     erlang:error(badarg, [Opts]).
+
+%% @doc Validate a start option set WITHOUT starting a process, returning `ok' or a
+%% descriptive `{error, Reason}'. Lets callers/supervisors/tests catch a bad config
+%% (bad size, unknown buffer type, an unloaded buffer module or one missing a required
+%% callback) up front instead of a late crash. Accepts the same map/proplist as
+%% {@link start_link/1}.
+-spec preflight(map() | list()) -> ok | {error, term()}.
+preflight(Opts) when is_map(Opts) ->
+    preflight(maps:to_list(Opts));
+preflight(Opts) when is_list(Opts) ->
+    check_opts(proplist_to_pobox_opt_with_defaults(Opts)).
+
+check_opts(#pobox_opts{max=Max}) when not (is_integer(Max) andalso Max > 0) ->
+    {error, {bad_max, Max}};
+check_opts(#pobox_opts{initial_state=S}) when S =/= notify, S =/= passive ->
+    {error, {bad_initial_state, S}};
+check_opts(#pobox_opts{type=Type}) ->
+    check_buffer_type(Type).
+
+check_buffer_type(queue) -> ok;
+check_buffer_type(stack) -> ok;
+check_buffer_type(keep_old) -> ok;
+check_buffer_type({mod, Mod}) when is_atom(Mod) -> check_buffer_module(Mod, {new, 0});
+check_buffer_type({mod, Mod, _Opts}) when is_atom(Mod) -> check_buffer_module(Mod, {new, 1});
+check_buffer_type(Other) -> {error, {bad_type, Other}}.
+
+%% A custom buffer must be loadable and export its constructor (new/0 or new/1) plus the
+%% mandatory push/2, pop/1 and drop/2 callbacks.
+check_buffer_module(Mod, NewFA) ->
+    case code:ensure_loaded(Mod) of
+        {module, Mod} -> check_exports(Mod, [NewFA, {push, 2}, {pop, 1}, {drop, 2}]);
+        {error, _}    -> {error, {module_not_loaded, Mod}}
+    end.
+
+check_exports(_Mod, []) ->
+    ok;
+check_exports(Mod, [{F, A} | Rest]) ->
+    case erlang:function_exported(Mod, F, A) of
+        true  -> check_exports(Mod, Rest);
+        false -> {error, {missing_callback, {Mod, F, A}}}
+    end.
 
 %% Normalize name to be used by gen:call gen:cast derived functions etc.
 start_link_name_to_name(Name0) ->

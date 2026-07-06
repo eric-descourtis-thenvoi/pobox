@@ -2,7 +2,9 @@
 -include_lib("common_test/include/ct.hrl").
 -compile(export_all).
 
-all() -> [mod_buffer_with_opts].
+all() -> [mod_buffer_with_opts,
+          preflight_valid, preflight_bad_max, preflight_bad_type,
+          preflight_module_not_loaded, preflight_missing_callback].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -26,3 +28,34 @@ mod_buffer_with_opts(_Config) ->
     [{my_prefix, hello}] = ?wait_msg({mail, Box, M, 1, 0}, M),
     unlink(Box),
     exit(Box, shutdown).
+
+%% D1: preflight/1 validates a config WITHOUT starting a process, returning ok for a
+%% good config and a descriptive {error, Reason} for a bad one.
+preflight_valid(_Config) ->
+    ok = pobox:preflight(#{max => 10, type => queue}),
+    ok = pobox:preflight(#{max => 10, type => keep_old, initial_state => passive}),
+    ok = pobox:preflight(#{max => 10, type => {mod, pobox_queue_buf}}),
+    ok = pobox:preflight(#{max => 10, type => {mod, pobox_configurable_buf, foo}}),
+    ok = pobox:preflight([{max, 5}, {type, stack}]).            %% proplist form too
+
+preflight_bad_max(_Config) ->
+    {error, {bad_max, 0}} = pobox:preflight(#{max => 0, type => queue}),
+    {error, {bad_max, -1}} = pobox:preflight(#{max => -1, type => queue}),
+    {error, {bad_max, undefined}} = pobox:preflight(#{type => queue}).  %% missing max
+
+preflight_bad_type(_Config) ->
+    {error, {bad_type, wat}} = pobox:preflight(#{max => 10, type => wat}),
+    {error, {bad_initial_state, sideways}} =
+        pobox:preflight(#{max => 10, type => queue, initial_state => sideways}).
+
+preflight_module_not_loaded(_Config) ->
+    {error, {module_not_loaded, no_such_pobox_mod}} =
+        pobox:preflight(#{max => 10, type => {mod, no_such_pobox_mod}}).
+
+preflight_missing_callback(_Config) ->
+    %% pobox_configurable_buf has new/1 but no new/0 -> {mod, Mod} needs new/0
+    {error, {missing_callback, {pobox_configurable_buf, new, 0}}} =
+        pobox:preflight(#{max => 10, type => {mod, pobox_configurable_buf}}),
+    %% pobox_queue_buf has new/0 but no new/1 -> {mod, Mod, Opts} needs new/1
+    {error, {missing_callback, {pobox_queue_buf, new, 1}}} =
+        pobox:preflight(#{max => 10, type => {mod, pobox_queue_buf, opts}}).
