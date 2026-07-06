@@ -19,6 +19,7 @@
               size = 0 :: non_neg_integer(),
               weight = 0 :: non_neg_integer(),
               drop = 0 :: drop(),
+              drop_weight = 0 :: non_neg_integer(),
               data = undefined :: undefined | queue:queue() | list()}).
 -else.
 -record(buf, {type = undefined :: undefined | stack | queue | keep_old | {mod, module()},
@@ -27,6 +28,7 @@
               size = 0 :: non_neg_integer(),
               weight = 0 :: non_neg_integer(),
               drop = 0 :: drop(),
+              drop_weight = 0 :: non_neg_integer(),
               data = undefined :: undefined | queue() | list()}).
 -endif.
 
@@ -79,6 +81,7 @@
                 owner_monitor_ref :: undefined | reference(),
                 heir :: undefined | pid() | atom(),
                 heir_data :: undefined | term(),
+                detailed_mail = false :: boolean(),
                 name :: name()}).
 
 -record(pobox_opts, {name :: undefined | name(),
@@ -87,6 +90,7 @@
                      max_weight = infinity :: infinity | pos_integer(),
                      type = queue :: stack | queue | keep_old | {mod, module()},
                      initial_state = notify :: notify | passive,
+                     detailed_mail = false :: boolean(),
                      heir :: undefined | name(),
                      heir_data :: undefined | term()}).
 
@@ -289,6 +293,7 @@ init(#pobox_opts{
     max_weight = MaxWeight,
     type = Type,
     initial_state = StateName,
+    detailed_mail = DetailedMail,
     heir = Heir,
     heir_data = HeirData
 }) ->
@@ -308,6 +313,7 @@ init(#pobox_opts{
         owner_monitor_ref=MaybeMonitorRef,
         heir=Heir,
         heir_data=HeirData,
+        detailed_mail=DetailedMail,
         name=Name1
     }}.
 
@@ -471,11 +477,20 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%% Private Function Definitions %%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-send(S=#state{buf=Buf, owner_pid=OwnerPid, filter=Fun, filter_state=FilterState}) ->
-    {Msgs, Count, Dropped, NewBuf} = buf_filter(Buf, Fun, FilterState),
-    OwnerPid ! {mail, self(), Msgs, Count, Dropped},
+send(S=#state{buf=Buf, owner_pid=OwnerPid, filter=Fun, filter_state=FilterState,
+              detailed_mail=Detailed}) ->
+    {Msgs, Count, Dropped, DeliveredW, LostW, NewBuf} = buf_filter(Buf, Fun, FilterState),
+    OwnerPid ! mail_msg(Detailed, Msgs, Count, Dropped, DeliveredW, LostW),
     NewState = S#state{buf=NewBuf, filter=undefined, filter_state=undefined},
     {next_state, passive, NewState}.
+
+%% Default mail keeps the {mail, Box, Msgs, Count, Lost} shape. With detailed_mail
+%% the last element is a metrics map that also carries the weight figures.
+mail_msg(false, Msgs, Count, Dropped, _DeliveredW, _LostW) ->
+    {mail, self(), Msgs, Count, Dropped};
+mail_msg(true, Msgs, Count, Dropped, DeliveredW, LostW) ->
+    {mail, self(), Msgs, #{count => Count, lost => Dropped,
+                           weight => DeliveredW, lost_weight => LostW}}.
 
 send_notification(S = #state{owner_pid=OwnerPid}) ->
     OwnerPid ! {mail, self(), new_data},
@@ -499,16 +514,16 @@ insert(Msg, B=#buf{type=T, size=Size, data=Data}) ->
 %% the running total. (Cap enforcement is added in a later cycle.)
 insert(Msg, _W, B=#buf{max_weight=infinity}) ->
     insert(Msg, B);
-insert(_Msg, W, B=#buf{max_weight=MW}) when W > MW ->
+insert(_Msg, W, B=#buf{max_weight=MW, drop=Drop, drop_weight=DW}) when W > MW ->
     %% Oversized: heavier than the whole cap, can never fit. Reject it (counted as a
     %% drop) without disturbing what is already buffered.
-    B#buf{drop=B#buf.drop + 1};
-insert(Msg, W, B=#buf{type=keep_old}) ->
+    B#buf{drop=Drop + 1, drop_weight=DW + W};
+insert(Msg, W, B=#buf{type=keep_old, drop=Drop, drop_weight=DW}) ->
     %% keep_old keeps the older messages: reject the new one when it doesn't fit,
     %% never dropping what is already buffered.
     case fits_after_add(W, B) of
         true  -> weighted_push(Msg, W, B);
-        false -> B#buf{drop=B#buf.drop + 1}
+        false -> B#buf{drop=Drop + 1, drop_weight=DW + W}
     end;
 insert(Msg, W, B=#buf{}) ->
     %% queue / stack / {mod}: drop from the drop-end to make room, then push. This
@@ -532,10 +547,11 @@ make_room(W, B) ->
             case B of
                 #buf{size=0} ->
                     B;
-                #buf{type=T, size=Size, weight=Weight, drop=Drop, data=Data} ->
-                    {{value, {DW, _Msg}}, NewData} = drop_one(T, Data),
-                    make_room(W, B#buf{size=Size-1, weight=Weight-DW,
-                                       drop=Drop+1, data=NewData})
+                #buf{type=T, size=Size, weight=Weight, drop=Drop,
+                     drop_weight=DropW, data=Data} ->
+                    {{value, {EW, _Msg}}, NewData} = drop_one(T, Data),
+                    make_room(W, B#buf{size=Size-1, weight=Weight-EW,
+                                       drop=Drop+1, drop_weight=DropW+EW, data=NewData})
             end
     end.
 
@@ -567,13 +583,18 @@ resize_buf(NewMax, B=#buf{type=T, size=Size, drop=Drop, data=Data}) ->
         B#buf{max=NewMax}
     end.
 
+%% Returns {Msgs, Count, Lost, DeliveredWeight, LostWeight, NewBuf}. On an unweighted
+%% box each message weighs 1, so delivered weight == count and lost weight == lost.
 buf_filter(Buf=#buf{max_weight=infinity, type=T, drop=D, data=Data, size=C}, Fun, State) ->
     {Msgs, Count, Dropped, NewData} = filter(T, Data, Fun, State),
-    {Msgs, Count, Dropped+D, Buf#buf{drop=0, size=C-(Count+Dropped), data=NewData}};
-buf_filter(Buf=#buf{type=T, drop=D, data=Data, size=C, weight=W}, Fun, State) ->
-    {Msgs, Count, Dropped, RemovedW, NewData} = wfilter(T, Data, Fun, State),
-    {Msgs, Count, Dropped+D, Buf#buf{drop=0, size=C-(Count+Dropped),
-                                     weight=W-RemovedW, data=NewData}}.
+    TotalLost = Dropped + D,
+    {Msgs, Count, TotalLost, Count, TotalLost,
+     Buf#buf{drop=0, size=C-(Count+Dropped), data=NewData}};
+buf_filter(Buf=#buf{type=T, drop=D, drop_weight=DW0, data=Data, size=C, weight=W}, Fun, State) ->
+    {Msgs, Count, Dropped, DeliveredW, FilterDroppedW, NewData} = wfilter(T, Data, Fun, State),
+    {Msgs, Count, Dropped+D, DeliveredW, FilterDroppedW+DW0,
+     Buf#buf{drop=0, drop_weight=0, size=C-(Count+Dropped),
+             weight=W-(DeliveredW+FilterDroppedW), data=NewData}}.
 
 filter(T, Data, Fun, State) ->
     filter(T, Data, Fun, State, [], 0, 0).
@@ -582,20 +603,20 @@ filter(T, Data, Fun, State) ->
 %% filter fun sees the unwrapped Msg, and we accumulate the weight removed (delivered
 %% or dropped) so the running total can be decremented.
 wfilter(T, Data, Fun, State) ->
-    wfilter(T, Data, Fun, State, [], 0, 0, 0).
+    wfilter(T, Data, Fun, State, [], 0, 0, 0, 0).
 
-wfilter(T, Data, Fun, State, Msgs, Count, Drop, RemovedW) ->
+wfilter(T, Data, Fun, State, Msgs, Count, Drop, DelW, DropW) ->
     case pop(T, Data) of
         {empty, NewData} ->
-            {lists:reverse(Msgs), Count, Drop, RemovedW, NewData};
+            {lists:reverse(Msgs), Count, Drop, DelW, DropW, NewData};
         {{value, {W, Msg}}, NewData} ->
             case Fun(Msg, State) of
                 {{ok, Term}, NewState} ->
-                    wfilter(T, NewData, Fun, NewState, [Term|Msgs], Count+1, Drop, RemovedW+W);
+                    wfilter(T, NewData, Fun, NewState, [Term|Msgs], Count+1, Drop, DelW+W, DropW);
                 {drop, NewState} ->
-                    wfilter(T, NewData, Fun, NewState, Msgs, Count, Drop+1, RemovedW+W);
+                    wfilter(T, NewData, Fun, NewState, Msgs, Count, Drop+1, DelW, DropW+W);
                 skip ->
-                    {lists:reverse(Msgs), Count, Drop, RemovedW, Data}
+                    {lists:reverse(Msgs), Count, Drop, DelW, DropW, Data}
             end
     end.
 

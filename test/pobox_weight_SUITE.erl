@@ -5,7 +5,8 @@
 all() -> [usage_detailed_unweighted, weighted_post_and_drain,
           weighted_overflow_drops_to_fit,
           weighted_overflow_keep_old, weighted_overflow_stack,
-          weighted_oversized_rejected, weighted_post_sync_full].
+          weighted_oversized_rejected, weighted_post_sync_full,
+          weighted_detailed_mail].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -113,5 +114,21 @@ weighted_post_sync_full(_Config) ->
     full = pobox:post_sync(Box, c, 10, 5000),   %% 110 > 100 -> does not fit
     full = pobox:post_sync(Box, big, 200, 5000),%% oversized -> full
     #{count := 2, weight := 100} = maps:with([count, weight], pobox:usage_detailed(Box)),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% A7: with detailed_mail => true the drained mail carries a metrics map instead of
+%% the count/lost scalars, reporting delivered weight and the weight lost since the
+%% last drain (here: a, dropped at insert time, weighs 50).
+weighted_detailed_mail(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                   type => queue, initial_state => passive,
+                                   detailed_mail => true}),
+    pobox:post(Box, a, 50),
+    pobox:post(Box, b, 40),
+    pobox:post(Box, c, 30),               %% drop a (50); buffered b+c weigh 70
+    pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
+    {[b, c], #{count := 2, lost := 1, weight := 70, lost_weight := 50}} =
+        ?wait_msg({mail, Box, M, Meta}, {M, Meta}),
     unlink(Box),
     exit(Box, shutdown).
