@@ -6,7 +6,8 @@ all() -> [call_reply_happy_path, call_dropped_on_keep_old_full,
           call_dropped_by_filter, call_noproc_on_box_death,
           call_timeout_when_no_reply, call_noproc_unregistered,
           call_queue_overflow_degrades_to_timeout,
-          concurrent_calls_each_get_their_own_reply].
+          concurrent_calls_each_get_their_own_reply,
+          call_timeout_leaves_no_stray_message].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -114,6 +115,52 @@ concurrent_calls_each_get_their_own_reply(_Config) ->
     end, lists:seq(1, N)),
     unlink(Box),
     exit(Box, shutdown).
+
+%% Robustness stress for the reply-vs-timeout race that motivated the E1 flush fix:
+%% many rounds where a caller uses a 1 ms timeout while the owner replies at roughly
+%% the same moment. Each caller must end up with exactly one clean outcome — {ok,_},
+%% {error,timeout} or {error,dropped} — and NO orphaned pobox-internal message in its
+%% mailbox. (The exact sub-instruction race the fix guards is not deterministically
+%% reproducible; this exercises the path and guards against gross regressions.)
+call_timeout_leaves_no_stray_message(_Config) ->
+    {ok, Box} = pobox:start_link(self(), 100, keep_old, passive),
+    Owner = self(),
+    lists:foreach(fun(_) -> race_round(Owner, Box) end, lists:seq(1, 500)),
+    unlink(Box),
+    exit(Box, shutdown).
+
+race_round(Owner, Box) ->
+    _Caller = spawn(fun() ->
+        R = pobox:call(Box, {req}, 1),   %% 1 ms timeout — races the reply below
+        Stray = [M || M <- element(2, process_info(self(), messages)),
+                      is_pobox_internal(M)],
+        Owner ! {round_done, R, Stray}
+    end),
+    %% Owner drains the call as soon as it lands and replies — racing the timeout.
+    _ = drain_and_reply_once(Box),
+    receive
+        {round_done, R, Stray} ->
+            [] = Stray,
+            true = lists:member(R, [{ok, answered}, {error, timeout}, {error, dropped}])
+    after 5000 ->
+        error(round_timeout)
+    end.
+
+drain_and_reply_once(Box) ->
+    pobox:active(Box, fun(M, S) -> {{ok, M}, S} end, no_state),
+    receive
+        {mail, Box, [Call], 1, 0} ->
+            {'$pobox_call', ReplyTo, {req}} = Call,
+            pobox:reply(ReplyTo, answered);
+        {mail, Box, [], 0, _} ->
+            ok
+    after 5000 ->
+        error(no_call_to_drain)
+    end.
+
+is_pobox_internal({'$pobox_reply', _, _}) -> true;
+is_pobox_internal({'$pobox_drop', _}) -> true;
+is_pobox_internal(_) -> false.
 
 %%%%%%%%%%%%%%%
 %%% HELPERS %%%

@@ -254,6 +254,15 @@ call(Box, Request, Opts) when is_map(Opts) ->
                     {error, noproc}
             after Timeout ->
                 erlang:demonitor(ReplyTo, [flush]),
+                %% demonitor/[flush] only clears a pending 'DOWN'; a reply or drop that
+                %% raced the timeout into our mailbox must be flushed explicitly so it
+                %% doesn't linger. (The alias is now deactivated, so no later one can
+                %% arrive.)
+                receive
+                    {'$pobox_reply', ReplyTo, _} -> ok;
+                    {'$pobox_drop', ReplyTo} -> ok
+                after 0 -> ok
+                end,
                 {error, timeout}
             end;
         _ ->
