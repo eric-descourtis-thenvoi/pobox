@@ -238,8 +238,11 @@ post_await(ReqId) ->
     post_await(ReqId, infinity).
 
 %% @doc Await the result of a {@link post_async/2} promise with a timeout. Returns the
-%% post result (`ok'/`full'), `timeout' if it did not arrive in time — the request stays
-%% valid and can be awaited again — or `{error, Reason}' if the box is gone.
+%% post result (`ok'/`full'), or one of two deliberately distinct non-results: the bare
+%% atom `timeout' is NON-terminal — the request stays valid, awaitable again — whereas
+%% `{error, Reason}' (e.g. `{error, noproc}' when the box is gone) is terminal. The
+%% shapes differ so the two cases can't be confused (bare atom = retry vs tagged = give
+%% up); `timeout' mirrors `gen_statem:wait_response/2'.
 -spec post_await(gen_statem:request_id(), timeout()) -> ok | full | timeout | {error, term()}.
 post_await(ReqId, Timeout) ->
     %% wait_response/2 (not receive_response/2) so a timeout does NOT abandon the

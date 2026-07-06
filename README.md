@@ -379,6 +379,8 @@ This is more a wishlist than a roadmap, in no particular order:
 - 1.6.0: added asynchronous posting — `pobox:post_async/2` returns a request-id promise
          and `pobox:post_await/1,2` collects its `ok`/`full` result, so a burst can be
          submitted concurrently instead of one blocking `post_sync` at a time.
+         (1.3.0–1.5.0 are the sibling weighting / calls / preflight changes; this branch
+         is sequenced after them, so the version lands as 1.6.0 once all merge.)
 - 1.2.0: added heir and `give_away` functionality / fixed `keep_old` buffer size tracking
 - 1.1.0: added `pobox_buf` behaviour to add custom buffer implementations
 - 1.0.4: move to gen\_statem implementation to avoid OTP 21 compile errors and OTP 20 warnings
