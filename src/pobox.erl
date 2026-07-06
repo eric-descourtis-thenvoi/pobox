@@ -87,7 +87,8 @@
 
 -export([start_link/1, start_link/2, start_link/3, start_link/4, start_link/5,
         resize/2, resize/3, usage/1, usage/2, active/3, notify/1, post/2,
-        post_sync/2, post_sync/3, give_away/3, give_away/4]).
+        post_sync/2, post_sync/3, post_async/2, post_await/1, post_await/2,
+        give_away/3, give_away/4]).
 -export([init/1,
          active_s/3, passive/3, notify/3,
          callback_mode/0, terminate/3, code_change/4]).
@@ -221,6 +222,30 @@ post_sync(Box, Msg) when ?PROCESS_NAME_GUARD(Box) ->
 -spec post_sync(name(), term(), timeout()) -> ok | full.
 post_sync(Box, Msg, Timeout) when ?PROCESS_NAME_GUARD(Box) ->
     gen_statem:call(Box, {post, Msg}, Timeout).
+
+%% @doc Asynchronously post a message and get a request id back (a promise), without
+%% blocking for the `ok'/`full' answer. Many messages can be posted this way and then
+%% collected with {@link post_await/2}, so a burst is submitted concurrently instead of
+%% one blocking round-trip at a time (the async analogue of {@link post_sync/2}).
+-spec post_async(name(), term()) -> gen_statem:request_id().
+post_async(Box, Msg) when ?PROCESS_NAME_GUARD(Box) ->
+    gen_statem:send_request(Box, {post, Msg}).
+
+%% @doc Await the result of a {@link post_async/2} promise (`ok' or `full').
+-spec post_await(gen_statem:request_id()) -> ok | full.
+post_await(ReqId) ->
+    post_await(ReqId, infinity).
+
+%% @doc Await the result of a {@link post_async/2} promise with a timeout. Returns the
+%% post result (`ok'/`full'), `timeout' if it did not arrive in time (the request stays
+%% valid and can be awaited again), or `{error, Reason}' if the box is gone.
+-spec post_await(gen_statem:request_id(), timeout()) -> ok | full | timeout | {error, term()}.
+post_await(ReqId, Timeout) ->
+    case gen_statem:receive_response(ReqId, Timeout) of
+        {reply, Reply}             -> Reply;
+        timeout                    -> timeout;
+        {error, {Reason, _Server}} -> {error, Reason}
+    end.
 
 %% @doc Give away the PO Box ownership to another process. This will send a message in the following form to Dest:
 %%      {pobox_transfer, BoxPid :: pid(), PreviousOwnerPid :: pid(), undefined, give_away}
