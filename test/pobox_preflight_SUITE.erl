@@ -7,7 +7,12 @@ all() -> [mod_buffer_with_opts,
           preflight_module_not_loaded, preflight_missing_callback,
           start_link_fails_fast_on_bad_module,
           preflight_bad_owner_and_heir,
-          positional_start_link_fails_fast_on_bad_module].
+          positional_start_link_fails_fast_on_bad_module,
+          opts_only_buffer_survives_overflow,
+          preflight_bad_name].
+
+-define(wait_mail(PAT, RET),
+    (fun() -> receive PAT -> RET after 2000 -> error({wait_too_long}) end end)()).
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -97,3 +102,29 @@ positional_start_link_fails_fast_on_bad_module(_Config) ->
         pobox:start_link(self(), 10, {mod, no_such_pobox_mod, some_opts}, passive),
     process_flag(trap_exit, Trap),
     ok.
+
+%% E-H1 (review): an opts-only {mod,Mod,Opts} buffer (only new/1, no new/0, no
+%% push_drop/2) must survive an overflow. The drop-all reset previously called Mod:new/0
+%% and crashed; it now empties via the mandatory Mod:drop/2.
+opts_only_buffer_survives_overflow(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 1,
+                                   type => {mod, pobox_opts_only_buf, ignored},
+                                   initial_state => passive}),
+    pobox:post(Box, m1),
+    pobox:post(Box, m2),                     %% overflow -> drop-all reset path
+    true = is_process_alive(Box),
+    pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
+    [m2] = ?wait_mail({mail, Box, Msgs, 1, 1}, Msgs),
+    unlink(Box), exit(Box, shutdown).
+
+%% E-M1 (review): preflight must validate `name` too (the class E1 closed for
+%% owner/heir, left open for name) — else preflight==ok but start_link raises badarg.
+preflight_bad_name(_Config) ->
+    {error, {bad_name, "bad"}} =
+        pobox:preflight(#{max => 10, type => queue, name => "bad"}),
+    {error, {bad_name, {not_a, name}}} =
+        pobox:preflight(#{max => 10, type => queue, name => {not_a, name}}),
+    %% valid name shapes still pass
+    ok = pobox:preflight(#{max => 10, type => queue, name => a_name}),
+    ok = pobox:preflight(#{max => 10, type => queue, name => {global, g}}),
+    ok = pobox:preflight(#{max => 10, type => queue}).           %% name defaults undefined

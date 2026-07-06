@@ -532,8 +532,11 @@ drop(keep_old, N, Size, Queue) ->
        Size =< N -> queue:new()
     end;
 drop({mod, Mod}, N, Size, Data) ->
+    %% Empty (or partially drain) the buffer via the mandatory drop/2 rather than
+    %% Mod:new/0 — an opts-only {mod,Mod,Opts} buffer need not export new/0, and
+    %% reconstructing via new/0 would also discard the buffer's Opts on a drop-all.
     if Size > N -> Mod:drop(N, Data);
-       Size =< N -> Mod:new()
+       Size =< N -> Mod:drop(Size, Data)
     end.
 
 push(queue, Msg, Q) -> queue:in(Msg, Q);
@@ -608,9 +611,13 @@ preflight(Opts) when is_list(Opts) ->
 
 check_opts(#pobox_opts{max=Max}) when not (is_integer(Max) andalso Max > 0) ->
     {error, {bad_max, Max}};
-check_opts(#pobox_opts{owner=Owner, heir=Heir, initial_state=S, type=Type}) ->
-    %% owner/heir use a function (not the guard macro) because the macro can't be
-    %% negated cleanly (`not ... orelse ...' precedence); mirrors validate_opts/1.
+check_opts(#pobox_opts{name=Name, owner=Owner, heir=Heir, initial_state=S, type=Type}) ->
+    %% owner/heir/name use functions (not the guard macros) because the macros can't be
+    %% negated cleanly (`not ... orelse ...' precedence); mirrors validate_opts/1. Note
+    %% `name' has different rules than owner/heir (registerable name, never a pid).
+    case Name =:= undefined orelse is_registered_name(Name) of
+        false -> {error, {bad_name, Name}};
+        true ->
     case is_process_name(Owner) of
         false -> {error, {bad_owner, Owner}};
         true ->
@@ -622,10 +629,19 @@ check_opts(#pobox_opts{owner=Owner, heir=Heir, initial_state=S, type=Type}) ->
                         true  -> check_buffer_type(Type)
                     end
             end
+    end
     end.
 
 is_process_name(V) ->
     is_pid(V) orelse is_atom(V)
+        orelse (is_tuple(V) andalso tuple_size(V) =:= 2 andalso element(1, V) =:= global)
+        orelse (is_tuple(V) andalso tuple_size(V) =:= 3 andalso element(1, V) =:= via).
+
+%% A registerable process name: like is_process_name/1 but WITHOUT pid and WITH {local,_}
+%% (mirrors ?PROCESS_NAME_GUARD_WITH_LOCAL_NO_PID that validate_opts uses for `name').
+is_registered_name(V) ->
+    is_atom(V)
+        orelse (is_tuple(V) andalso tuple_size(V) =:= 2 andalso element(1, V) =:= local)
         orelse (is_tuple(V) andalso tuple_size(V) =:= 2 andalso element(1, V) =:= global)
         orelse (is_tuple(V) andalso tuple_size(V) =:= 3 andalso element(1, V) =:= via).
 
@@ -640,8 +656,9 @@ check_buffer_type(Other) -> {error, {bad_type, Other}}.
 %% mandatory push/2, pop/1 and drop/2 callbacks.
 check_buffer_module(Mod, NewFA) ->
     case code:ensure_loaded(Mod) of
-        {module, Mod} -> check_exports(Mod, [NewFA, {push, 2}, {pop, 1}, {drop, 2}]);
-        {error, _}    -> {error, {module_not_loaded, Mod}}
+        {module, Mod}   -> check_exports(Mod, [NewFA, {push, 2}, {pop, 1}, {drop, 2}]);
+        {error, nofile} -> {error, {module_not_loaded, Mod}};
+        {error, Why}    -> {error, {module_load_error, Mod, Why}}
     end.
 
 check_exports(_Mod, []) ->
