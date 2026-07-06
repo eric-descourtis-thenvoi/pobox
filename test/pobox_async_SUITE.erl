@@ -2,7 +2,9 @@
 -include_lib("common_test/include/ct.hrl").
 -compile(export_all).
 
-all() -> [async_post_and_await, pipelined_posts, async_await_noproc].
+all() -> [async_post_and_await, pipelined_posts, async_await_noproc,
+          async_await_reawaitable_after_timeout, async_await_infinity,
+          async_await1_noproc].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -51,3 +53,34 @@ async_await_noproc(_Config) ->
     receive {'DOWN', Ref, process, Box, _} -> ok after 2000 -> error(box_not_dead) end,
     ReqId = pobox:post_async(Box, x),
     {error, noproc} = pobox:post_await(ReqId, 2000).
+
+%% E1 (review M1/M3): a timed-out promise must stay valid and be re-awaitable — the
+%% documented "promise" contract. Suspend the box so the first await deterministically
+%% times out, then resume and re-await for the real result. (receive_response abandons
+%% on timeout and would lose it; wait_response does not.)
+async_await_reawaitable_after_timeout(_Config) ->
+    {ok, Box} = pobox:start_link(self(), 10, keep_old, passive),
+    sys:suspend(Box),
+    ReqId = pobox:post_async(Box, msg),
+    timeout = pobox:post_await(ReqId, 50),     %% box suspended -> times out
+    sys:resume(Box),
+    ok = pobox:post_await(ReqId, 5000),        %% re-await gets the result
+    unlink(Box), exit(Box, shutdown).
+
+%% E2 (review M3): post_await/1 (infinity) happy path — previously uncovered.
+async_await_infinity(_Config) ->
+    {ok, Box} = pobox:start_link(self(), 10, keep_old, passive),
+    ReqId = pobox:post_async(Box, msg),
+    ok = pobox:post_await(ReqId),
+    unlink(Box), exit(Box, shutdown).
+
+%% E3 (review M2): post_await/1 can return {error, noproc} (a box dying during an
+%% infinity await), which the spec must admit.
+async_await1_noproc(_Config) ->
+    {ok, Box} = pobox:start_link(self(), 10, queue, passive),
+    unlink(Box),
+    Ref = monitor(process, Box),
+    exit(Box, shutdown),
+    receive {'DOWN', Ref, process, Box, _} -> ok after 2000 -> error(box_not_dead) end,
+    ReqId = pobox:post_async(Box, x),
+    {error, noproc} = pobox:post_await(ReqId).

@@ -231,17 +231,20 @@ post_sync(Box, Msg, Timeout) when ?PROCESS_NAME_GUARD(Box) ->
 post_async(Box, Msg) when ?PROCESS_NAME_GUARD(Box) ->
     gen_statem:send_request(Box, {post, Msg}).
 
-%% @doc Await the result of a {@link post_async/2} promise (`ok' or `full').
--spec post_await(gen_statem:request_id()) -> ok | full.
+%% @doc Await the result of a {@link post_async/2} promise (`ok' or `full'), or
+%% `{error, Reason}' if the box is gone before it answers.
+-spec post_await(gen_statem:request_id()) -> ok | full | {error, term()}.
 post_await(ReqId) ->
     post_await(ReqId, infinity).
 
 %% @doc Await the result of a {@link post_async/2} promise with a timeout. Returns the
-%% post result (`ok'/`full'), `timeout' if it did not arrive in time (the request stays
-%% valid and can be awaited again), or `{error, Reason}' if the box is gone.
+%% post result (`ok'/`full'), `timeout' if it did not arrive in time — the request stays
+%% valid and can be awaited again — or `{error, Reason}' if the box is gone.
 -spec post_await(gen_statem:request_id(), timeout()) -> ok | full | timeout | {error, term()}.
 post_await(ReqId, Timeout) ->
-    case gen_statem:receive_response(ReqId, Timeout) of
+    %% wait_response/2 (not receive_response/2) so a timeout does NOT abandon the
+    %% request — the promise stays valid to await again, as documented.
+    case gen_statem:wait_response(ReqId, Timeout) of
         {reply, Reply}             -> Reply;
         timeout                    -> timeout;
         {error, {Reason, _Server}} -> {error, Reason}
