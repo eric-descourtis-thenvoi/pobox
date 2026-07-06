@@ -2,7 +2,7 @@
 -include_lib("common_test/include/ct.hrl").
 -compile(export_all).
 
-all() -> [call_reply_happy_path].
+all() -> [call_reply_happy_path, call_dropped_on_keep_old_full].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -32,5 +32,15 @@ call_reply_happy_path(_Config) ->
     %% Client got the owner's reply directly.
     {ok, 5} = ?wait_msg({client_result, R}, R),
     _ = Client,
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% B2: on a full keep_old box, a new call is rejected at admission; the caller is
+%% told {error, dropped} promptly (not left to time out). keep_old is the drop-safe
+%% substrate for calls.
+call_dropped_on_keep_old_full(_Config) ->
+    {ok, Box} = pobox:start_link(self(), 1, keep_old, passive),
+    pobox:post(Box, filler),                       %% box is now full (size 1 of 1)
+    {error, dropped} = pobox:call(Box, {req}, 2000),
     unlink(Box),
     exit(Box, shutdown).

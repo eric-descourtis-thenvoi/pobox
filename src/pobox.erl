@@ -483,10 +483,24 @@ buf_new(stack, Size) -> #buf{type=stack, max=Size, data=[]};
 buf_new(keep_old, Size) -> #buf{type=keep_old, max=Size, data=queue:new()};
 buf_new(T={mod, Mod}, Size) -> #buf{type=T, max=Size, data=Mod:new()}.
 
+insert(Msg, B=#buf{type=keep_old, max=Size, size=Size, drop=Drop, data=Data}) ->
+    %% keep_old rejects the NEW message when full — the dropped element is in hand, so
+    %% if it is a call, tell the caller right away instead of letting it time out.
+    maybe_notify_drop(Msg),
+    B#buf{drop=Drop+1, data=push_drop(keep_old, Msg, Size, Data)};
 insert(Msg, B=#buf{type=T, max=Size, size=Size, drop=Drop, data=Data}) ->
     B#buf{drop=Drop+1, data=push_drop(T, Msg, Size, Data)};
 insert(Msg, B=#buf{type=T, size=Size, data=Data}) ->
     B#buf{size=Size+1, data=push(T, Msg, Data)}.
+
+%% Notify a dropped call so its caller doesn't block until timeout. Only fires where
+%% the dropped element is already in hand (keep_old admission-reject, filter drop);
+%% plain messages and bulk drops are unaffected.
+maybe_notify_drop({'$pobox_call', ReplyTo, _Request}) when is_reference(ReplyTo) ->
+    ReplyTo ! {'$pobox_drop', ReplyTo},
+    ok;
+maybe_notify_drop(_Msg) ->
+    ok.
 
 size(#buf{size=Size}) -> Size.
 
