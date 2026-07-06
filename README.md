@@ -231,6 +231,18 @@ Which is objectively much simpler.
 Messages can be sent to a PO Box by calling `pobox:post(BoxPid, Msg)` or
 sending a message directly to the process as `BoxPid ! {post, Msg}`.
 
+`pobox:post_sync/2,3` posts and blocks for `ok`/`full` feedback. To submit a
+burst without a blocking round-trip per message, use the asynchronous form:
+`pobox:post_async/2` returns a request id (a promise) immediately, and
+`pobox:post_await/1,2` collects its result later. This is the `rpc:async_call`
+/ `rpc:yield` pattern — fire everything, then gather:
+
+    ReqIds  = [pobox:post_async(Box, M) || M <- Messages],  %% none blocks
+    Results = [pobox:post_await(R, 5000) || R <- ReqIds].   %% each is ok | full
+
+`post_await/2` returns `timeout` if the answer hasn't arrived yet (the promise
+stays valid and can be awaited again), or `{error, noproc}` if the box is gone.
+
 The ownership of the PO Box can be transfered to another process by calling:
 
     pobox:give_away(BoxPid, DestPid, DestData, Timeout)
@@ -364,6 +376,9 @@ This is more a wishlist than a roadmap, in no particular order:
 - Provide default filter functions in a new module
 
 ## Changelog
+- 1.6.0: added asynchronous posting — `pobox:post_async/2` returns a request-id promise
+         and `pobox:post_await/1,2` collects its `ok`/`full` result, so a burst can be
+         submitted concurrently instead of one blocking `post_sync` at a time.
 - 1.2.0: added heir and `give_away` functionality / fixed `keep_old` buffer size tracking
 - 1.1.0: added `pobox_buf` behaviour to add custom buffer implementations
 - 1.0.4: move to gen\_statem implementation to avoid OTP 21 compile errors and OTP 20 warnings
