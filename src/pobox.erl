@@ -68,7 +68,10 @@
 -type in() :: {'post', Msg::term()}.
 -type note() :: {'mail', Self::pid(), new_data}.
 -type mail() :: {'mail', Self::pid(), Msgs::list(),
-                         Count::non_neg_integer(), Lost::drop()}.
+                         Count::non_neg_integer(), Lost::drop()}
+              | {'mail', Self::pid(), Msgs::list(),
+                         #{count := non_neg_integer(), lost := drop(),
+                           weight := non_neg_integer(), lost_weight := non_neg_integer()}}.
 -type name() :: {local, atom()} | {global, term()} | atom() | pid() | {via, module(), term()}.
 
 -export_type([max/0, filter/0, in/0, mail/0, note/0]).

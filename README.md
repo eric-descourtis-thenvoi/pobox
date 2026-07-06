@@ -150,8 +150,11 @@ before. On a weighted box:
 - A single message heavier than the whole cap can never fit, so it is rejected
   outright (via `post_sync`, `full`) without disturbing what is already
   buffered.
-- `post_sync/4` replies `full` when the message would not fit (a weight-aware
-  generalization of `post_sync/3`'s count-only signal).
+- `post_sync/4` replies `full` when admitting the message would drop something or it is
+  oversized (a weight-aware generalization of `post_sync/3`'s count-only signal). As with
+  `post_sync/3`, `full` does **not** by itself mean *your* message was dropped — on a
+  `queue`/`stack` box an older message is dropped and yours is kept; only on `keep_old`
+  (or when oversized) does `full` mean your message did not enter.
 
 Inspect a box with:
 
@@ -425,7 +428,9 @@ This is more a wishlist than a roadmap, in no particular order:
 - 1.3.0: added optional message weighting — a second, opt-in cap on total buffer
          weight alongside the count cap (`max_weight`, `post/3`, `post_sync/4`,
          `usage_detailed/1,2`, map-form `resize`, opt-in `detailed_mail`, and an
-         optional `drop_one/1` buffer callback). Fully backward compatible.
+         optional `drop_one/1` buffer callback). The existing 1.2 API and unweighted
+         boxes are unchanged; the new inputs are validated (bad values rejected with
+         `badarg` at start or `{error, badarg}` from map-form `resize`).
 - 1.2.0: added heir and `give_away` functionality / fixed `keep_old` buffer size tracking
 - 1.1.0: added `pobox_buf` behaviour to add custom buffer implementations
 - 1.0.4: move to gen\_statem implementation to avoid OTP 21 compile errors and OTP 20 warnings
