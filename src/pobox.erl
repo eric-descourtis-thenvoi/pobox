@@ -482,6 +482,10 @@ insert(Msg, B=#buf{type=T, size=Size, data=Data}) ->
 %% the running total. (Cap enforcement is added in a later cycle.)
 insert(Msg, _W, B=#buf{max_weight=infinity}) ->
     insert(Msg, B);
+insert(_Msg, W, B=#buf{max_weight=MW}) when W > MW ->
+    %% Oversized: heavier than the whole cap, can never fit. Reject it (counted as a
+    %% drop) without disturbing what is already buffered.
+    B#buf{drop=B#buf.drop + 1};
 insert(Msg, W, B=#buf{type=keep_old}) ->
     %% keep_old keeps the older messages: reject the new one when it doesn't fit,
     %% never dropping what is already buffered.

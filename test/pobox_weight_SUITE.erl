@@ -4,7 +4,8 @@
 
 all() -> [usage_detailed_unweighted, weighted_post_and_drain,
           weighted_overflow_drops_to_fit,
-          weighted_overflow_keep_old, weighted_overflow_stack].
+          weighted_overflow_keep_old, weighted_overflow_stack,
+          weighted_oversized_rejected].
 
 init_per_suite(Config) -> Config.
 end_per_suite(_Config) -> ok.
@@ -84,5 +85,19 @@ weighted_overflow_stack(_Config) ->
     #{count := 2, weight := 80} = maps:with([count, weight], pobox:usage_detailed(Box)),
     pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
     {[c, a], 2, 1} = ?wait_msg({mail, Box, M, Cnt, Lost}, {M, Cnt, Lost}),
+    unlink(Box),
+    exit(Box, shutdown).
+
+%% A5: a single message heavier than the whole cap can never fit, so it is rejected
+%% outright — counted as a drop, but the already-buffered messages are left intact
+%% (the buffer is NOT emptied chasing impossible room).
+weighted_oversized_rejected(_Config) ->
+    {ok, Box} = pobox:start_link(#{owner => self(), max => 10, max_weight => 100,
+                                   type => queue, initial_state => passive}),
+    pobox:post(Box, a, 50),
+    pobox:post(Box, big, 200),            %% 200 > 100 -> rejected, a untouched
+    #{count := 1, weight := 50} = maps:with([count, weight], pobox:usage_detailed(Box)),
+    pobox:active(Box, fun(X, S) -> {{ok, X}, S} end, no_state),
+    {[a], 1, 1} = ?wait_msg({mail, Box, M, Cnt, Lost}, {M, Cnt, Lost}),
     unlink(Box),
     exit(Box, shutdown).
